@@ -27,6 +27,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo::rustc-env=VCHORD_BM25_VERSION={version}");
     if var("CARGO_CFG_TARGET_OS")? == "linux" {
         println!("cargo::rustc-link-arg-cdylib=-Wl,-Bsymbolic");
+        println!("cargo::rustc-link-arg-cdylib=-Wl,--no-gc-sections");
     }
     if var("CARGO_CFG_TARGET_OS")? == "macos" {
         if let Some(path) = var_os("PGRX_PG_CONFIG_PATH") {

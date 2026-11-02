@@ -9,10 +9,6 @@ autotests = false
 name = "vchord_bm25"
 crate-type = ["cdylib", "lib"]
 
-[[bin]]
-name = "pgrx_embed_vchord_bm25"
-path = "./src/bin/pgrx_embed.rs"
-
 [features]
 default = ["simd/init"]
 pg14 = ["pgrx/pg14"]
@@ -28,15 +24,14 @@ index = { path = "./crates/index" }
 simd = { path = "./crates/simd" }
 
 getrandom.workspace = true
-pgrx = "=0.17.0"
-pgrx-catalog = "0.3.2"
+pgrx = "=0.19.3"
 rand.workspace = true
 serde.workspace = true
-toml = "1.1.2"
+toml = "1.1.8"
 validator.workspace = true
 
 [target.'cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), any(target_os = "linux", target_os = "macos")))'.dependencies]
-mimalloc = { version = "=0.1.48", features = ["local_dynamic_tls"] }
+mimalloc = { version = "=0.1.52", features = ["local_dynamic_tls"] }
 
 [lints]
 workspace = true
@@ -50,11 +45,11 @@ version = "0.0.0"
 edition = "2024"
 
 [workspace.dependencies]
-getrandom = "0.4.2"
-rand = "0.10.1"
-serde = { version = "1.0.228", features = ["derive"] }
-validator = { version = "0.20.0", features = ["derive"] }
-zerocopy = { version = "0.8.48", features = ["derive", "simd"] }
+getrandom = "0.4.3"
+rand = "0.10.3"
+serde = { version = "1.0.229", features = ["derive"] }
+validator = { version = "0.21.0", features = ["derive"] }
+zerocopy = { version = "0.8.63", features = ["derive", "simd"] }
 
 [workspace.lints]
 # complexity

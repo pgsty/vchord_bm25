@@ -60,6 +60,7 @@ pub fn multiversion(
         vis,
         sig,
         block,
+        ..
     } = item_fn;
     let name = sig.ident.to_string();
     if sig.constness.is_some() {

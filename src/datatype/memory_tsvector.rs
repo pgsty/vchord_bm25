@@ -170,21 +170,21 @@ unsafe impl pgrx::datum::UnboxDatum for TsVectorOutput {
 // SqlTranslatable
 
 unsafe impl SqlTranslatable for TsVectorInput<'_> {
-    fn argument_sql() -> Result<SqlMapping, ArgumentError> {
-        Ok(SqlMapping::As(String::from("tsvector")))
-    }
-    fn return_sql() -> Result<Returns, ReturnsError> {
-        Ok(Returns::One(SqlMapping::As(String::from("tsvector"))))
-    }
+    const TYPE_IDENT: &'static str = pgrx::pgrx_resolved_type!(TsVectorInput<'_>);
+    const TYPE_ORIGIN: TypeOrigin = TypeOrigin::External;
+    const ARGUMENT_SQL: Result<SqlMappingRef, ArgumentError> =
+        Ok(SqlMappingRef::literal("tsvector"));
+    const RETURN_SQL: Result<ReturnsRef, ReturnsError> =
+        Ok(ReturnsRef::One(SqlMappingRef::literal("tsvector")));
 }
 
 unsafe impl SqlTranslatable for TsVectorOutput {
-    fn argument_sql() -> Result<SqlMapping, ArgumentError> {
-        Ok(SqlMapping::As(String::from("tsvector")))
-    }
-    fn return_sql() -> Result<Returns, ReturnsError> {
-        Ok(Returns::One(SqlMapping::As(String::from("tsvector"))))
-    }
+    const TYPE_IDENT: &'static str = pgrx::pgrx_resolved_type!(TsVectorOutput);
+    const TYPE_ORIGIN: TypeOrigin = TypeOrigin::External;
+    const ARGUMENT_SQL: Result<SqlMappingRef, ArgumentError> =
+        Ok(SqlMappingRef::literal("tsvector"));
+    const RETURN_SQL: Result<ReturnsRef, ReturnsError> =
+        Ok(ReturnsRef::One(SqlMappingRef::literal("tsvector")));
 }
 
 // ArgAbi
