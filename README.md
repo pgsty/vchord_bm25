@@ -1,65 +1,110 @@
-<div align="center">
-<img src="https://github.com/tensorchord/marketing-material/raw/main/vectorchord/logo-light.svg" width="200" alt="VectorChord Logo">
-<h4 align=center></h4>
-</div>
+# vchord_bm25
 
-<p align=center>
-<a href="https://discord.gg/KqswhpVgdU"><img alt="discord invitation link" src="https://dcbadge.vercel.app/api/server/KqswhpVgdU?style=flat"></a>
-<a href="https://twitter.com/TensorChord"><img src="https://img.shields.io/twitter/follow/tensorchord?style=social" alt="Twitter" /></a>
-</p>
+[![Website: vchord.pgsty.com](https://img.shields.io/badge/Website-vchord.pgsty.com-slategray?style=flat&logo=cilium&logoColor=white)](https://vchord.pgsty.com/)
+[![Docs: vchord_bm25](https://img.shields.io/badge/Docs-vchord__bm25-slategray?style=flat)](https://vchord.pgsty.com/bm25/)
+[![PGEXT: vchord_bm25](https://img.shields.io/badge/PGEXT-vchord__bm25-%233E668F?style=flat&logo=postgresql&logoColor=white&labelColor=3E668F)](https://pgext.cloud/ext/vchord_bm25)
+[![Pigsty: vchord_bm25](https://img.shields.io/badge/Pigsty-vchord__bm25-slategray?style=flat)](https://pigsty.io/ext/e/vchord_bm25)
+[![Version: v0.3.0](https://img.shields.io/badge/Version-v0.3.0-slategray?style=flat)](https://github.com/pgsty/vchord_bm25/releases)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-slategray?style=flat&logo=gnu&logoColor=white)](https://github.com/pgsty/vchord_bm25/blob/main/LICENSE)
+[![GitHub Stars](https://img.shields.io/github/stars/pgsty/vchord_bm25?style=flat&logo=github&logoColor=black&color=slategray)](https://star-history.com/#pgsty/vchord_bm25&Date)
+[![PostgreSQL: 14-18](https://img.shields.io/badge/PostgreSQL-14--18-%233E668F?style=flat&logo=postgresql&logoColor=white&labelColor=3E668F)](https://pgext.cloud/ext/vchord_bm25)
 
-VectorChord-BM25 is a PostgreSQL extension for bm25 ranking algorithm. We implemented the Block-WeakAnd Algorithms for BM25 ranking inside PostgreSQL. It's recommended to be used with [pg_tokenizer.rs](https://github.com/tensorchord/pg_tokenizer.rs) for customized tokenization.
+**`vchord_bm25`** is a PostgreSQL extension for native BM25 full-text ranking powered by the Block-WeakAnd (WAND) algorithm, designed to work alongside [`pg_tokenizer`](https://github.com/pgsty/pg_tokenizer) and [`vchord`](https://github.com/pgsty/vchord).
 
-## Getting Started
-For new users, we recommend using `tensorchord/vchord-suite` image to get started quickly, you can find more details in the [VectorChord-images](https://github.com/tensorchord/VectorChord-images) repository.
+[Website](https://vchord.pgsty.com/) | [BM25 Docs](https://vchord.pgsty.com/bm25/) | [Tokenizer Docs](https://vchord.pgsty.com/bm25/tokenizer/overview/) | [vchord](https://github.com/pgsty/vchord) | [pg_tokenizer](https://github.com/pgsty/pg_tokenizer) | [PGEXT](https://pgext.cloud/ext/vchord_bm25) | [Pigsty](https://pigsty.io/ext/e/vchord_bm25) ([中文](https://pigsty.cc/ext/e/vchord_bm25)) | [Releases](https://github.com/pgsty/vchord_bm25/releases) | [Issues](https://github.com/pgsty/vchord_bm25/issues)
 
-```sh
+---
+
+## Vchord Suite
+
+`vchord_bm25` is part of the **Vchord** extension family maintained by [PGSTY](https://pgsty.com):
+
+- **[`vchord`](https://github.com/pgsty/vchord)** ([`pgsty/vchord`](https://github.com/pgsty/vchord) · [PGEXT](https://pgext.cloud/ext/vchord) · [Pigsty](https://pigsty.io/ext/e/vchord)): Scalable, high-performance, and disk-friendly vector similarity search (`vchordrq` & `vchordg`).
+- **[`vchord_bm25`](https://github.com/pgsty/vchord_bm25)** ([`pgsty/vchord_bm25`](https://github.com/pgsty/vchord_bm25) · [PGEXT](https://pgext.cloud/ext/vchord_bm25) · [Pigsty](https://pigsty.io/ext/e/vchord_bm25)): Native BM25 full-text ranking index (`Block-WeakAnd`).
+- **[`pg_tokenizer`](https://github.com/pgsty/pg_tokenizer)** ([`pgsty/pg_tokenizer`](https://github.com/pgsty/pg_tokenizer) · [PGEXT](https://pgext.cloud/ext/pg_tokenizer) · [Pigsty](https://pigsty.io/ext/e/pg_tokenizer)): Standalone multilingual text analyzer and vocabulary tokenizer.
+
+---
+
+## Features
+
+- **Block-WeakAnd BM25 Index**: Native PostgreSQL index access method (`USING bm25`) with block-max pruning for fast top-K lexical ranking without scanning every matching row.
+- **Sparse `bm25vector` Data Type**: Represents tokenized documents as compact sparse vectors of vocabulary IDs and term frequencies, scored via the `<&>` operator.
+- **Customizable Tokenization**: Pairs with [`pg_tokenizer`](https://github.com/pgsty/pg_tokenizer) to support pre-trained models (`bert_base_uncased`, `llmlingua2`, `gemma2b`), corpus-trained custom models, and multilingual segmentation (English, Chinese `jieba`, Japanese `lindera`).
+- **Native Hybrid Search**: Combines seamlessly with [`vchord`](https://github.com/pgsty/vchord) dense and multi-vector indexes in SQL using Reciprocal Rank Fusion (RRF).
+
+---
+
+## Quick Start
+
+For full setup details (Debian packages, source builds, and configuration), see the [BM25 Installation Guide](https://vchord.pgsty.com/bm25/getting-started/installation/).
+
+### 1. Install via Native Linux Packages ([`pig`](https://pig.pgsty.com/))
+
+On EL 8/9/10, Debian 12/13, and Ubuntu 22.04/24.04 (PostgreSQL 14–18), install pre-built native packages from the [Pigsty repository](https://pigsty.io/ext/e/vchord_bm25) (see package matrix on [pgext.cloud](https://pgext.cloud/ext/vchord_bm25)):
+
+```bash
+curl -fsSL https://repo.pigsty.io/pig | bash
+pig repo add pgsql -u
+pig ext add vchord_bm25 pg_tokenizer
+```
+
+### 2. Run with Docker
+
+You can also start a ready-to-use container with the [`tensorchord/vchord-suite`](https://vchord.pgsty.com/docs/getting-started/vectorchord-suite/) image, which bundles PostgreSQL, [`vchord`](https://github.com/pgsty/vchord), [`vchord_bm25`](https://github.com/pgsty/vchord_bm25), and [`pg_tokenizer`](https://github.com/pgsty/pg_tokenizer):
+
+```bash
 docker run \
   --name vchord-suite \
   -e POSTGRES_PASSWORD=postgres \
   -p 5432:5432 \
   -d tensorchord/vchord-suite:pg18-latest
-  # If you want to use ghcr image, you can change the image to `ghcr.io/tensorchord/vchord-suite:pg18-latest`.
-  # if you want to use the specific version, you can use the tag `pg17-20250414`, supported version can be found in the support matrix.
+  # Or from GHCR: ghcr.io/tensorchord/vchord-suite:pg18-latest
 ```
 
-Once everything’s set up, you can connect to the database using the `psql` command line tool. The default username is `postgres`, and the default password is `postgres`. Here’s how to connect:
+Connect to the database using `psql`:
 
-```sh
+```bash
 psql -h localhost -p 5432 -U postgres
 ```
 
-After connecting, run the following SQL to make sure the extension is enabled:
+### 3. Enable Extensions
+
+Enable `pg_tokenizer` and `vchord_bm25`, and include `bm25_catalog` and `tokenizer_catalog` in your `search_path`:
 
 ```sql
-CREATE EXTENSION IF NOT EXISTS pg_tokenizer CASCADE;  -- for tokenizer
-CREATE EXTENSION IF NOT EXISTS vchord_bm25 CASCADE;   -- for bm25 ranking
+CREATE EXTENSION IF NOT EXISTS pg_tokenizer CASCADE;
+CREATE EXTENSION IF NOT EXISTS vchord_bm25 CASCADE;
+
+SET search_path TO "$user", public, bm25_catalog, tokenizer_catalog;
 ```
+
+---
 
 ## Usage
 
-The extension is mainly composed by three parts, tokenizer, bm25vector and bm25vector index. The tokenizer is used to convert the text into a bm25vector, and the bm25vector is similar to a sparse vector, which stores the vocabulary id and frequency. The bm25vector index is used to speed up the search and ranking process.
-
-To tokenize a text, you can use the `tokenize` function. The `tokenize` function takes two arguments, the text to tokenize and the tokenizer name. 
+A typical BM25 workflow consists of three parts: a **tokenizer** that converts text into token IDs, a **`bm25vector`** column that stores token IDs and term frequencies, and a **`bm25` index** that maintains global document frequencies and accelerates top-K ranking.
 
 > [!NOTE]
-> Tokenizer part is completed by a separate extension [pg_tokenizer.rs](https://github.com/tensorchord/pg_tokenizer.rs), more details can be found [here](https://github.com/tensorchord/pg_tokenizer.rs/tree/main/docs).
+> Tokenization is provided by [`pg_tokenizer`](https://github.com/pgsty/pg_tokenizer). See the [Tokenizer Documentation](https://vchord.pgsty.com/bm25/tokenizer/overview/) for model configuration details.
+
+### 1. Create a Tokenizer
 
 ```sql
--- create a tokenizer
+-- Create a tokenizer using a pre-trained BERT vocabulary
 SELECT create_tokenizer('bert', $$
-model = "bert_base_uncased"  # using pre-trained model
+model = "bert_base_uncased"
 $$);
--- tokenize text with bert tokenizer
+
+-- Tokenize sample text into a bm25vector
 SELECT tokenize('A quick brown fox jumps over the lazy dog.', 'bert')::bm25vector;
 -- Output: {1012:1, 1037:1, 1996:1, 2058:1, 2829:1, 3899:1, 4248:1, 4419:1, 13971:1, 14523:1}
--- The output is a bm25vector, 1012:1 means the word with id 1012 appears once in the text.
 ```
 
-One thing special about bm25 score is that it depends on a global document frequency, which means the score of a word in a document depends on the frequency of the word in all documents. To calculate the bm25 score between a bm25vector and a query, you need had a document set first and then use the `<&>` operator.
+### 2. Populate Documents and Build a `bm25` Index
+
+Because BM25 scoring relies on global document frequency statistics across the corpus, create a `bm25` index on the `bm25vector` column before querying with `<&>`:
 
 ```sql
--- Setup the document table
 CREATE TABLE documents (
     id SERIAL PRIMARY KEY,
     passage TEXT,
@@ -77,44 +122,31 @@ INSERT INTO documents (passage) VALUES
 ('The PostgreSQL community is active and regularly improves the database system.'),
 ('Relational databases such as PostgreSQL can handle both structured and unstructured data.'),
 ('Effective search ranking algorithms, such as BM25, improve search results by understanding relevance.');
-```
 
-Then tokenize it 
-
-```sql
 UPDATE documents SET embedding = tokenize(passage, 'bert');
-```
 
-Create the index on the bm25vector column so that we can collect the global document frequency.
-
-```sql
 CREATE INDEX documents_embedding_bm25 ON documents USING bm25 (embedding bm25_ops);
 ```
 
-Now we can calculate the BM25 score between the query and the vectors. Note that the BM25 score in VectorChord-BM25 is negative, which means the more negative the score, the more relevant the document is. We intentionally make it negative so that you can use the default order by to get the most relevant documents first.
+### 3. Query with BM25 Ranking
+
+Note that `vchord_bm25` returns **negative** BM25 scores (`<&>`) so that standard ascending `ORDER BY` returns the most relevant documents first:
 
 ```sql
--- bm25query(index_name, query, tokenizer_name)
--- <&> is the operator to compute the bm25 score
-SELECT id, passage, embedding <&> bm25query('documents_embedding_bm25', tokenize('PostgreSQL', 'bert')) AS bm25_score FROM documents;
-```
-
-And you can use the order by to utilize the index to get the most relevant documents first and faster.
-```sql
-SELECT id, passage, embedding <&> bm25query('documents_embedding_bm25', tokenize('PostgreSQL', 'bert')) AS rank
+SELECT id, passage, embedding <&> to_bm25query('documents_embedding_bm25', tokenize('PostgreSQL', 'bert')) AS rank
 FROM documents
 ORDER BY rank
 LIMIT 10;
 ```
 
-## More Examples
+### More Examples
 
 <details>
-<summary>Using custom model</summary>
+<summary>Using a custom model</summary>
 
-### Using custom model
+#### Using a custom model
 
-You can also build a custom model based on your own corpus easily.
+You can train a custom vocabulary model directly from your own text corpus:
 
 ```sql
 CREATE TABLE documents (
@@ -123,23 +155,22 @@ CREATE TABLE documents (
     embedding bm25vector
 );
 
--- create a text analyzer to generate tokens that can be used to train the model
+-- Create a text analyzer to normalize, filter stopwords, and stem tokens
 SELECT create_text_analyzer('text_analyzer1', $$
-pre_tokenizer = "unicode_segmentation"  # split texts according to the Unicode Standard Annex #29
+pre_tokenizer = "unicode_segmentation"  # split texts according to Unicode Standard Annex #29
 [[character_filters]]
 to_lowercase = {}                       # convert all characters to lowercase
 [[character_filters]]
-unicode_normalization = "nfkd"          # normalize the text to Unicode Normalization Form KD
+unicode_normalization = "nfkd"          # normalize text to Unicode Normalization Form KD
 [[token_filters]]
-skip_non_alphanumeric = {}              # skip tokens that all characters are not alphanumeric
+skip_non_alphanumeric = {}              # skip non-alphanumeric tokens
 [[token_filters]]
-stopwords = "nltk_english"              # remove stopwords using the nltk dictionary
+stopwords = "nltk_english"              # remove stopwords using the NLTK dictionary
 [[token_filters]]
 stemmer = "english_porter2"             # stem tokens using the English Porter2 stemmer
 $$);
 
--- create a model to generate embeddings from original passage
--- It'll train a model from passage column and store the embeddings in the embedding column
+-- Train a custom model from documents.passage and set up an automatic trigger
 SELECT create_custom_model_tokenizer_and_trigger(
     tokenizer_name => 'tokenizer1',
     model_name => 'model1',
@@ -149,7 +180,7 @@ SELECT create_custom_model_tokenizer_and_trigger(
     target_column => 'embedding'
 );
 
-INSERT INTO documents (passage) VALUES 
+INSERT INTO documents (passage) VALUES
 ('PostgreSQL is a powerful, open-source object-relational database system. It has over 15 years of active development.'),
 ('Full-text search is a technique for searching in plain-text documents or textual database fields. PostgreSQL supports this with tsvector.'),
 ('BM25 is a ranking function used by search engines to estimate the relevance of documents to a given search query.'),
@@ -163,7 +194,7 @@ INSERT INTO documents (passage) VALUES
 
 CREATE INDEX documents_embedding_bm25 ON documents USING bm25 (embedding bm25_ops);
 
-SELECT id, passage, embedding <&> bm25query('documents_embedding_bm25', tokenize('PostgreSQL', 'tokenizer1')) AS rank
+SELECT id, passage, embedding <&> to_bm25query('documents_embedding_bm25', tokenize('PostgreSQL', 'tokenizer1')) AS rank
 FROM documents
 ORDER BY rank
 LIMIT 10;
@@ -174,9 +205,9 @@ LIMIT 10;
 <details>
 <summary>Using jieba for Chinese text</summary>
 
-### Using jieba for Chinese text
+#### Using jieba for Chinese text
 
-For chinese text, you can use [`jieba`](https://github.com/messense/jieba-rs) pre-tokenizer to segment the text into words. And then train a custom model with segmented words.
+For Chinese text, use the [`jieba`](https://github.com/messense/jieba-rs) pre-tokenizer to segment text into words and train a custom model:
 
 ```sql
 CREATE TABLE documents (
@@ -185,7 +216,6 @@ CREATE TABLE documents (
     embedding bm25vector
 );
 
--- create a text analyzer which uses jieba pre-tokenizer
 SELECT create_text_analyzer('text_analyzer1', $$
 [pre_tokenizer.jieba]
 $$);
@@ -199,7 +229,7 @@ SELECT create_custom_model_tokenizer_and_trigger(
     target_column => 'embedding'
 );
 
-INSERT INTO documents (passage) VALUES 
+INSERT INTO documents (passage) VALUES
 ('红海早过了，船在印度洋面上开驶着，但是太阳依然不饶人地迟落早起，侵占去大部分的夜。'),
 ('夜仿佛纸浸了油变成半透明体；它给太阳拥抱住了，分不出身来，也许是给太阳陶醉了，所以夕照晚霞褪后的夜色也带着酡红。'),
 ('到红消醉醒，船舱里的睡人也一身腻汗地醒来，洗了澡赶到甲板上吹海风，又是一天开始。'),
@@ -217,7 +247,7 @@ INSERT INTO documents (passage) VALUES
 
 CREATE INDEX documents_embedding_bm25 ON documents USING bm25 (embedding bm25_ops);
 
-SELECT id, passage, embedding <&> bm25query('documents_embedding_bm25', tokenize('人', 'tokenizer1')) AS rank
+SELECT id, passage, embedding <&> to_bm25query('documents_embedding_bm25', tokenize('人', 'tokenizer1')) AS rank
 FROM documents
 ORDER BY rank
 LIMIT 10;
@@ -228,11 +258,12 @@ LIMIT 10;
 <details>
 <summary>Using lindera for Japanese text</summary>
 
-### Using lindera for Japanese text
+#### Using lindera for Japanese text
 
-For Japanese text, you can use [`lindera`](https://github.com/lindera/lindera) model with its configuration.
+For Japanese text, use [`lindera`](https://github.com/lindera/lindera) with an IPADIC dictionary configuration:
 
-> It requires extra compile flags. We don't enable it default, and you need to recompile it from source.
+> [!NOTE]
+> `lindera` requires optional compile-time flags and is not enabled by default; build `pg_tokenizer` from source with `lindera` enabled if needed.
 
 ```sql
 CREATE TABLE documents (
@@ -241,7 +272,6 @@ CREATE TABLE documents (
     embedding bm25vector
 );
 
--- using lindera config to customize the tokenizer, see https://github.com/lindera/lindera
 SELECT create_lindera_model('lindera_ipadic', $$
 [segmenter]
 mode = "normal"
@@ -314,7 +344,7 @@ SELECT create_tokenizer('lindera_ipadic', $$
 model = "lindera_ipadic"
 $$);
 
-INSERT INTO documents (passage) VALUES 
+INSERT INTO documents (passage) VALUES
 ('どこで生れたかとんと見当けんとうがつかぬ。'),
 ('何でも薄暗いじめじめした所でニャーニャー泣いていた事だけは記憶している。'),
 ('吾輩はここで始めて人間というものを見た。'),
@@ -335,7 +365,7 @@ UPDATE documents SET embedding = tokenize(passage, 'lindera_ipadic');
 
 CREATE INDEX documents_embedding_bm25 ON documents USING bm25 (embedding bm25_ops);
 
-SELECT id, passage, embedding <&> bm25query('documents_embedding_bm25', tokenize('書生', 'lindera_ipadic')) AS rank
+SELECT id, passage, embedding <&> to_bm25query('documents_embedding_bm25', tokenize('書生', 'lindera_ipadic')) AS rank
 FROM documents
 ORDER BY rank
 LIMIT 10;
@@ -343,128 +373,92 @@ LIMIT 10;
 
 </details>
 
+---
+
 ## Tokenizer
 
-Tokenizer configuration is a critical aspect of effective text processing, significantly impacting the performance and accuracy. Here are some key considerations and options to help you choose the right tokenizer for your use case.
+Tokenizer selection determines both recall quality and indexing speed. Full details are available in the [Tokenizer Documentation](https://vchord.pgsty.com/bm25/tokenizer/overview/).
 
-## Tokenizer Options
+### Tokenizer Options
 
-Tokenizers can be configured in two primary ways:
-
-- Pre-Trained Models: Suitable for most standard use cases, these models are efficient and require minimal setup. They are ideal for general-purpose applications where the text aligns with the model's training data.
-- Custom Models: Offer flexibility and superior accuracy for specialized texts. These models are trained on specific corpora, making them suitable for domains with unique terminology, such as technical fields or industry-specific jargon.
-
-Usage Details can be found in [pg_tokenizer doc](https://github.com/tensorchord/pg_tokenizer.rs/blob/main/docs/04-usage.md)
+- **[Pre-Trained Models](https://vchord.pgsty.com/bm25/tokenizer/models/)**: Ready out of the box with minimal setup (`bert_base_uncased`, `wiki_tocken`, `gemma2b`, `llmlingua2`). Best when your corpus matches general-purpose language distributions.
+- **[Custom Models](https://vchord.pgsty.com/bm25/tokenizer/text-analyzer/)**: Trained directly on your table columns via customizable character filters, pre-tokenizers, and token filters. Ideal for domain-specific terminology, abbreviations, and non-English corpora.
 
 ### Key Considerations
 
-1. Language and Script:
-- **Space-Separated Languages** (e.g., English, Spanish, German): Simple tokenizers such as `bert` (for English) or `unicode` tokenizers are effective here.
-- **Non-Space-Separated Languages** (e.g., Chinese, Japanese): These require specialized algorithms (pre-tokenizer) that understand language structure beyond simple spaces. You can refer [Chinese](#using-jieba-for-chinese-text) and [Japanese](#using-lindera-for-japanese-text) example.
-- **Multilingual Data**: Handling multiple languages within a single index requires tokenizers designed for multilingual support, such as `gemma2b` or `llmlingua2`, which efficiently manage diverse scripts and languages.
+1. **Language and Script**:
+   - **Space-Separated Languages** (e.g., English, Spanish, German): Standard `unicode_segmentation` or `bert_base_uncased` works well.
+   - **Non-Space-Separated Languages** (e.g., Chinese, Japanese): Use language-aware pre-tokenizers such as [Chinese `jieba`](#using-jieba-for-chinese-text) or [Japanese `lindera`](#using-lindera-for-japanese-text), or see the [Multilingual Guide](https://vchord.pgsty.com/bm25/tokenizer/multilingual/).
+   - **Multilingual Corpora**: Pre-trained models like `gemma2b` or `llmlingua2` handle mixed scripts in a single index.
+2. **Vocabulary Complexity**:
+   - **General Text**: Pre-trained models handle everyday vocabulary without training overhead.
+   - **Domain-Specific Text**: Technical terms, identifiers, or abbreviations (e.g., `k8s`) benefit from [custom models](#using-a-custom-model) and synonym/stopword dictionaries.
 
-2. Vocabulary Complexity:
-- **Standard Language**: For texts with common vocabulary, pre-trained models are sufficient. They handle everyday language efficiently without requiring extensive customization.
-- **Specialized Texts**: Technical terms, abbreviations (e.g., "k8s" for Kubernetes), or compound nouns may need custom models. Custom models can be trained to recognize domain-specific terms, ensuring accurate tokenization. Custom synonyms may also be necessary for precise results. See [custom model](#using-custom-model) example.
+### Model Preloading
 
-### Preload (for performance)
+By default, PostgreSQL loads a tokenizer model on first use in each backend connection. To avoid first-query latency, preload models at server startup:
 
-For each connection, Postgresql will load the model at the first time you use it. This may cause a delay for the first query. You can use the `add_preload_model` function to preload the model at the server startup.
-
-```sh
+```bash
 psql -c "SELECT add_preload_model('model1')"
-# restart the PostgreSQL to take effects
-sudo docker restart container_name         # for pg_tokenizer running with docker
-sudo systemctl restart postgresql.service  # for pg_tokenizer running with systemd
+sudo systemctl restart postgresql
 ```
 
-The default preload model is `llmlingua2`. You can change it by using `add_preload_model`, `remove_preload_model` functions.
+> [!NOTE]
+> Large pre-trained models consume memory when preloaded (~100 MB for `gemma2b`, ~200 MB for `llmlingua2`). Manage preloaded models via `add_preload_model` and `remove_preload_model`.
 
-> Note: The pre-trained model may take a lot of memory (100MB for gemma2b, 200MB for llmlingua2). If you have a lot of models, you should consider the memory usage when you preload the model.
+---
 
-<!-- ## Performance Benchmark
+## Comparison with Other PostgreSQL Solutions
 
-We used datasets are from [xhluca/bm25-benchmarks](https://github.com/xhluca/bm25-benchmarks) and compare the results with ElasticSearch and Lucene. The QPS reflects the query efficiency with the index structure. And the NDCG@10 reflects the ranking quality of the search engine, which is totally based on the tokenizer. This means we can achieve the same ranking quality as ElasticSearch and Lucene if using the exact same tokenizer. 
+- **Built-in `tsvector` + `GIN`**: PostgreSQL's native full-text search lacks BM25 corpus-level inverse document frequency (IDF) and length normalization, and evaluates `ts_rank` across all matching rows before sorting.
+- **ParadeDB (`pg_search`)**: Embeds Tantivy as a full-featured search engine replacement inside PostgreSQL with its own query DSL.
+- **`vchord_bm25`**: Focuses purely on native BM25 ranking inside PostgreSQL via a lightweight Block-WeakAnd index access method and standard SQL operators (`<&>`), designed to compose naturally with `pgvector` and `vchord`.
 
-### QPS Result
+## Limitations
 
-| Dataset          | VectorChord-BM25 | ElasticSearch |
-| ---------------- | ---------------- | ------------- |
-| trec-covid       | 28.38            | 27.31         |
-| webis-touche2020 | 38.57            | 32.05         |
+- Index scans return up to `bm25_catalog.bm25_limit` candidates (default `100`). Increase `bm25_catalog.bm25_limit` when requesting larger `LIMIT` clauses or combining with selective `WHERE` filters.
 
-### NDCG@10 Result
-
-| Dataset          | VectorChord-BM25 | ElasticSearch | Lucene |
-| ---------------- | ---------------- | ------------- | ------ |
-| trec-covid       | 67.67            | 68.80         | 61.0   |
-| webis-touche2020 | 31.0             | 34.70         | 33.2   |
-
-## Installation
-
-1. Setup development environment.
-
-You can follow the docs about [`pgvecto.rs`](https://docs.pgvecto.rs/developers/development.html).
-
-2. Install the extension.
-
-```sh
-cargo pgrx install --sudo --release
-```
-
-3. Configure your PostgreSQL by modifying `search_path` to include the extension.
-
-```sh
-psql -U postgres -c 'ALTER SYSTEM SET search_path TO "$user", public, bm25_catalog'
-# You need restart the PostgreSQL cluster to take effects.
-sudo systemctl restart postgresql.service   # for vchord_bm25.rs running with systemd
-```
-
-4. Connect to the database and enable the extension.
-
-```sql
-DROP EXTENSION IF EXISTS vchord_bm25;
-CREATE EXTENSION vchord_bm25;
-``` -->
-
-## Comparison to other solution in Postgres
-PostgreSQL supports full-text search using the tsvector data type and GIN indexes. Text is transformed into a tsvector, which tokenizes content into standardized lexemes, and a GIN index accelerates searches—even on large text fields. However, PostgreSQL lacks modern relevance scoring methods like BM25; it retrieves all matching documents and re-ranks them using ts_rank, which is inefficient and can obscure the most relevant results.
-
-ParadeDB is an alternative that functions as a full-featured PostgreSQL replacement for ElasticSearch. It offloads full-text search and filtering operations to Tantivy and includes BM25 among its features, though it uses a different query and filter syntax than PostgreSQL's native indexes.
-
-In contrast, Vectorchord-bm25 focuses exclusively on BM25 ranking within PostgreSQL. We implemented the BM25 ranking algorithm Block WeakAnd from scratch and built it as a custom operator and index (similar to pgvector) to accelerate queries. It is designed to be lightweight and a more native and intuitive API for better full-text search and ranking in PostgreSQL.
-
-## Limitation
-- The index will return up to `bm25_catalog.bm25_limit` results to PostgreSQL. Users need to adjust the `bm25_catalog.bm25_limit` for more results when using larger limit values or stricter filter conditions.
-- We currently have only tested against English. Other language can be supported with bpe tokenizer with larger vocab like tiktoken out of the box. Feel free to talk to us or raise issue if you need more language support.
+---
 
 ## Reference
 
+See the full [SQL Reference](https://vchord.pgsty.com/bm25/reference/sql/) and [GUC Reference](https://vchord.pgsty.com/bm25/reference/gucs/) for complete documentation.
+
 ### Data Types
 
-- `bm25vector`: A specialized vector type for storing BM25 tokenized text. Structured as a sparse vector, it stores token IDs and their corresponding frequencies. For example, `{1:2, 2:1}` indicates that token ID 1 appears twice and token ID 2 appears once in the document.
-- `bm25query`: A query type for BM25 ranking.
+- `bm25vector`: Sparse vector storing token IDs and term frequencies (e.g., `{1:2, 2:1}` means token ID `1` appears twice and token ID `2` appears once).
+- `bm25query`: Composite query value pairing a target `bm25` index OID with a query `bm25vector`.
 
-### Functions
+### Functions & Operators
 
-- `bm25query(regclass, bm25vector) RETURNS bm25query`: Convert the input text into a BM25 query.
+- `to_bm25query(regclass, bm25vector) RETURNS bm25query`: Construct a BM25 query against a specific `bm25` index.
+- `bm25vector <&> bm25query RETURNS float4`: Compute the **negative** BM25 score (more negative = more relevant, enabling standard ascending `ORDER BY`).
+- `bm25vector = bm25vector RETURNS boolean` / `bm25vector <> bm25vector RETURNS boolean`: Equality and inequality comparison.
+- `int[]::bm25vector (implicit)`: Cast an integer array of token IDs into a frequency-aggregated `bm25vector` (e.g., `{1, 2, 1}` → `{1:2, 2:1}`).
 
-### Operators
+### GUC Parameters
 
-- `bm25vector = bm25vector RETURNS boolean`: Check if two BM25 vectors are equal.
-- `bm25vector <> bm25vector RETURNS boolean`: Check if two BM25 vectors are not equal.
-- `bm25vector <&> bm25query RETURNS float4`: Calculate the **negative** BM25 score between the BM25 vector and query. The lower the score, the more relevant the document is. (This is intentionally designed to be negative for easier sorting.)
+- `bm25_catalog.bm25_limit` (`integer`, default `100`, range `-1`..`65535`): Maximum candidates returned by a `bm25` index scan (`-1` forces a brute-force scan).
+- `bm25_catalog.enable_index` (`boolean`, default `true`): Enable or disable the `bm25` index planner path.
+- `bm25_catalog.segment_growing_max_page_size` (`integer`, default `4096`, range `1`..`1000000`): Maximum page count of a growing segment before sealing.
 
-### Casts
+---
 
-- `int[]::bm25vector (implicit)`: Cast an integer array to a BM25 vector. The integer array represents token IDs, and the cast aggregates duplicates into frequencies, ignoring token order. For example, `{1, 2, 1}` will be cast to `{1:2, 2:1}` (token ID 1 appears twice, token ID 2 appears once).
+## Documentation
 
-### GUCs
+Full documentation is available at **[vchord.pgsty.com/bm25](https://vchord.pgsty.com/bm25/)**:
 
-- `bm25_catalog.bm25_limit (integer)`: The maximum number of documents to return in a search. Default is 100, minimum is -1, and maximum is 65535. When set to -1, it will perform brute force search and return all documents with scores greater than 0.
-- `bm25_catalog.enable_index (boolean)`: Whether to enable the bm25 index. Default is true.
-- `bm25_catalog.segment_growing_max_page_size (integer)`: The maximum page count of the growing segment. When the size of the growing segment exceeds this value, the segment will be sealed into a read-only segment. Default is 4,096, minimum is 1, and maximum is 1,000,000.
+- **Getting Started**: [Overview](https://vchord.pgsty.com/bm25/getting-started/overview/) · [Quick Start](https://vchord.pgsty.com/bm25/getting-started/quick-start/) · [Installation](https://vchord.pgsty.com/bm25/getting-started/installation/)
+- **Usage**: [Indexing](https://vchord.pgsty.com/bm25/usage/indexing/) · [Querying](https://vchord.pgsty.com/bm25/usage/querying/) · [Filtering](https://vchord.pgsty.com/bm25/usage/filtering/) · [Hybrid Search](https://vchord.pgsty.com/bm25/usage/hybrid-search/) · [Algorithms](https://vchord.pgsty.com/bm25/usage/algorithms/)
+- **Tokenizer**: [Overview](https://vchord.pgsty.com/bm25/tokenizer/overview/) · [Models](https://vchord.pgsty.com/bm25/tokenizer/models/) · [Text Analyzer](https://vchord.pgsty.com/bm25/tokenizer/text-analyzer/) · [Multilingual](https://vchord.pgsty.com/bm25/tokenizer/multilingual/)
+- **Reference**: [SQL Reference](https://vchord.pgsty.com/bm25/reference/sql/) · [GUC Reference](https://vchord.pgsty.com/bm25/reference/gucs/) · [Benchmarks](https://vchord.pgsty.com/bm25/reference/benchmarks/) · [Versions](https://vchord.pgsty.com/bm25/reference/versions/)
+
+---
 
 ## License
 
-This program is free software: you can redistribute it and/or modify it under the terms of the **GNU Affero General Public License v3.0 (AGPL-3.0-only)**. See [LICENSE](LICENSE) for details.
+This software is licensed under the **GNU Affero General Public License v3.0 (AGPLv3)**. You may use, modify, and distribute this software under the terms of the [AGPLv3](LICENSE).
+
+- Copyright (c) 2025-2026 TensorChord Inc.
+- Copyright (c) 2026 PGSTY PTE. LTD.
+- Maintained by [Ruohang Feng](mailto:rh@vonng.com) @ [PGSTY](https://pgsty.com)
