@@ -1,8 +1,7 @@
 name: Check
 
+# Temporarily keep CI manual while the local package builds are validated.
 on:
-  push:
-  pull_request:
   workflow_dispatch:
 
 concurrency:

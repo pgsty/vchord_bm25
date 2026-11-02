@@ -10,9 +10,9 @@ index = { path = "../index" }
 score = { path = "../score" }
 simd = { path = "../simd" }
 
-blake3 = "1.8.4"
+blake3 = "1.8.7"
 getrandom.workspace = true
-memmap2 = "0.9.10"
+memmap2 = "0.9.12"
 serde.workspace = true
 validator.workspace = true
 zerocopy.workspace = true

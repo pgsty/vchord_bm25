@@ -1,8 +1,7 @@
 name: Publish
 
+# Temporarily keep publishing manual while the local package builds are validated.
 on:
-  release:
-    types: [created]
   workflow_dispatch:
     inputs:
       tag:

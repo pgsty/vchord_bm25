@@ -9,9 +9,62 @@
 use crate::datatype::memory_tsvector::{TsVectorInput, TsVectorOutput};
 use crate::datatype::tsvector::{cast_tsvector_to_document, cast_tsvector_to_query};
 use crate::index::storage::PostgresRelation;
+use pgrx::datum::IntoDatum;
 use pgrx::pg_sys::Oid;
-use pgrx_catalog::{PgAm, PgClass, PgClassRelkind};
+use std::ffi::{CStr, CString, c_char};
 use std::num::NonZero;
+
+struct ClassInfo {
+    relname: CString,
+    relam: Oid,
+    relkind: c_char,
+}
+
+unsafe fn heap_tuple_struct<T>(tuple: pgrx::pg_sys::HeapTuple) -> *const T {
+    let tuple = unsafe { &*tuple };
+    let data = tuple.t_data;
+    unsafe { data.cast::<u8>().add((*data).t_hoff as usize).cast::<T>() }
+}
+
+fn am_oid_by_name(amname: &CStr) -> Option<Oid> {
+    let tuple = unsafe {
+        pgrx::pg_sys::SearchSysCache1(
+            pgrx::pg_sys::SysCacheIdentifier::AMNAME as i32,
+            amname.into_datum()?,
+        )
+    };
+    if tuple.is_null() {
+        return None;
+    }
+    let oid = unsafe {
+        let am = heap_tuple_struct::<pgrx::pg_sys::FormData_pg_am>(tuple);
+        (*am).oid
+    };
+    unsafe { pgrx::pg_sys::ReleaseSysCache(tuple) };
+    Some(oid)
+}
+
+fn class_info(reloid: Oid) -> Option<ClassInfo> {
+    let tuple = unsafe {
+        pgrx::pg_sys::SearchSysCache1(
+            pgrx::pg_sys::SysCacheIdentifier::RELOID as i32,
+            reloid.into_datum()?,
+        )
+    };
+    if tuple.is_null() {
+        return None;
+    }
+    let info = unsafe {
+        let class = heap_tuple_struct::<pgrx::pg_sys::FormData_pg_class>(tuple);
+        ClassInfo {
+            relname: CStr::from_ptr((*class).relname.data.as_ptr()).to_owned(),
+            relam: (*class).relam,
+            relkind: (*class).relkind,
+        }
+    };
+    unsafe { pgrx::pg_sys::ReleaseSysCache(tuple) };
+    Some(info)
+}
 
 #[pgrx::pg_extern(stable, strict, parallel_safe)]
 pub fn _bm25_evaluate(lhs: TsVectorInput, rhs: pgrx::composite_type!("bm25query")) -> f64 {
@@ -25,19 +78,17 @@ pub fn _bm25_evaluate(lhs: TsVectorInput, rhs: pgrx::composite_type!("bm25query"
         Ok(None) => pgrx::error!("bm25query contains a null index"),
         Err(_) => unreachable!(),
     };
-    let pg_am = PgAm::search_amname(c"bm25").unwrap();
-    let Some(pg_am) = pg_am.get() else {
+    let Some(pg_am_oid) = am_oid_by_name(c"bm25") else {
         pgrx::error!("vchord_bm25 is not installed");
     };
-    let pg_class = PgClass::search_reloid(index).unwrap();
-    let Some(pg_class) = pg_class.get() else {
+    let Some(pg_class) = class_info(index) else {
         pgrx::error!("the relation does not exist");
     };
-    if pg_class.relkind() != PgClassRelkind::Index {
-        pgrx::error!("the relation {:?} is not an index", pg_class.relname());
+    if pg_class.relkind != pgrx::pg_sys::RELKIND_INDEX as c_char {
+        pgrx::error!("the relation {:?} is not an index", pg_class.relname);
     }
-    if pg_class.relam() != pg_am.oid() {
-        pgrx::error!("the index {:?} is not a bm25 index", pg_class.relname());
+    if pg_class.relam != pg_am_oid {
+        pgrx::error!("the index {:?} is not a bm25 index", pg_class.relname);
     }
     let relation = Index::open(index, pgrx::pg_sys::AccessShareLock as _);
     let index = unsafe { PostgresRelation::new(relation.raw()) };
