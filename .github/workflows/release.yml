@@ -95,20 +95,18 @@ jobs:
           make DESTDIR="~/debian" install
           mkdir -p ~/debian/usr/share/doc/postgresql-${VERSION}-vchord-bm25/
           echo "Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
-          Upstream-Name: VectorChord-bm25
-          Source: https://github.com/tensorchord/VectorChord-bm25
+          Upstream-Name: vchord_bm25
+          Source: https://github.com/pgsty/vchord_bm25
 
           Files: *
           Copyright: Copyright (c) 2025-2026 TensorChord Inc.
-          License: AGPL-3.0-only OR Elastic-2.0
+                     Copyright (c) 2026 PGSTY PTE. LTD.
+          License: AGPL-3.0-only
 
           License: AGPL-3.0-only
-           $(cat ./licenses/LICENSE.AGPLv3 | sed 's/^$/./' | sed 's/^/ /')
-
-          License: Elastic-2.0
-            $(cat ./licenses/LICENSE.ELv2 | sed 's/^$/./' | sed 's/^/ /')
+           $(cat ./LICENSE | sed 's/^$/./' | sed 's/^/ /')
           " \
-          >> ~/debian/usr/share/doc/postrgesql-${VERSION}-vchord-bm25/copyright
+          >> ~/debian/usr/share/doc/postgresql-${VERSION}-vchord-bm25/copyright
           ARCH=$(uname -m)
           PLATFORM=$(dpkg --print-architecture)
           mkdir -p ~/debian/DEBIAN
@@ -118,10 +116,10 @@ jobs:
           Section: database
           Priority: optional
           Architecture: ${PLATFORM}
-          Maintainer: Tensorchord <support@tensorchord.ai>
+          Maintainer: Ruohang Feng <rh@vonng.com>
           Description: A postgresql extension for bm25 ranking algorithm
            Native BM25 Ranking Index in PostgreSQL.
-          Homepage: https://vectorchord.ai/" \
+          Homepage: https://vchord.pgsty.com/" \
           > ~/debian/DEBIAN/control
           (cd ~/debian && find usr -type f -print0 | xargs -0 md5sum) > ~/debian/DEBIAN/md5sums
           dpkg-deb --root-owner-group -Zxz --build ~/debian ~/postgresql-${VERSION}-vchord-bm25_${SEMVER}-1_${PLATFORM}.deb
@@ -130,15 +128,17 @@ jobs:
 #  pgxn:
 #    runs-on: "ubuntu-latest"
 #    needs: ["semver", "build"]
+#    env:
+#      SEMVER: ${{ needs.semver.outputs.SEMVER }}
+#      PGXN_PASSWORD: ${{ secrets.PGXN_PASSWORD }}
 #
 #    steps:
 #      - name: Checkout
+#        if: env.PGXN_PASSWORD != ''
 #        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 #
 #      - name: Upload
-#        env:
-#          SEMVER: ${{ needs.semver.outputs.SEMVER }}
-#          PGXN_PASSWORD: ${{ secrets.PGXN_PASSWORD }}
+#        if: env.PGXN_PASSWORD != ''
 #        run: |
 #          mkdir -p ./build
 #
@@ -146,7 +146,7 @@ jobs:
 #          git archive --format zip --prefix "vchord_bm25-${SEMVER}/" --add-file META.json -o "./build/vchord_bm25--${SEMVER}.zip" HEAD
 #
 #          curl --fail -sS \
-#            --user "tensorchord:${PGXN_PASSWORD}" \
+#            --user "vonng:${PGXN_PASSWORD}" \
 #            -F "submit=Release It!" \
 #            -F "archive=@./build/vchord_bm25--${SEMVER}.zip" \
 #            -H "X-Requested-With: XMLHttpRequest" \

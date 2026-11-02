@@ -417,9 +417,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             runner,
         }) => {
             if !std::fs::exists("./vchord_bm25.control")? {
-                return Err(
-                    "The script must be run from the VectorChord-bm25 source directory.".into(),
-                );
+                return Err("The script must be run from the vchord_bm25 source directory.".into());
             }
             let vchord_bm25_version =
                 control_file("./vchord_bm25.control")?["default_version"].clone();
@@ -512,9 +510,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         Commands::Clippy(ClippyArgs { target, profile }) => {
             if !std::fs::exists("./vchord_bm25.control")? {
-                return Err(
-                    "The script must be run from the VectorChord-bm25 source directory.".into(),
-                );
+                return Err("The script must be run from the vchord_bm25 source directory.".into());
             }
             let path = if let Some(value) = std::env::var_os("PG_CONFIG") {
                 PathBuf::from(value)

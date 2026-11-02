@@ -18,11 +18,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             if let Some(prefix_stripped) = line.strip_prefix("default_version = '")
                 && let Some(stripped) = prefix_stripped.strip_suffix("'")
             {
-                eprintln!("VectorChord-bm25 version: {stripped}");
+                eprintln!("vchord_bm25 version: {stripped}");
                 break 'version stripped.to_string();
             }
         }
-        return Err("VectorChord-bm25 version is not defined.".into());
+        return Err("vchord_bm25 version is not defined.".into());
     };
     println!("cargo::rustc-env=VCHORD_BM25_VERSION={version}");
     if var("CARGO_CFG_TARGET_OS")? == "linux" {
