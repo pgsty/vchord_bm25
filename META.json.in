@@ -1,11 +1,12 @@
 {
     "name": "vchord_bm25",
-    "abstract": "A postgresql extension for bm25 ranking algorithm",
-    "description": "Native BM25 Ranking Index in PostgreSQL",
+    "abstract": "A postgresql extension for bm25 ranking algorithm, fork by PGSTY",
+    "description": "Native BM25 Ranking Index in PostgreSQL, fork by PGSTY",
     "version": "@DISTVERSION@",
     "maintainer": [
-        "TensorChord support@tensorchord.ai",
-        "usamoi usamoi@tensorchord.ai"
+        "Ruohang Feng <rh@vonng.com>",
+        "usamoi <usamoi@tensorchord.ai>",
+        "TensorChord <support@tensorchord.ai>"
     ],
     "license": "agpl_3",
     "prereqs": {
@@ -24,17 +25,17 @@
         }
     },
     "resources": {
-        "homepage": "https://github.com/tensorchord/VectorChord-bm25",
+        "homepage": "https://vchord.pgsty.com",
         "bugtracker": {
-            "web": "https://github.com/tensorchord/VectorChord-bm25/issues"
+            "web": "https://github.com/pgsty/vchord_bm25/issues"
         },
         "repository": {
-            "url": "https://github.com/tensorchord/VectorChord-bm25.git",
-            "web": "https://github.com/tensorchord/VectorChord-bm25",
+            "url": "https://github.com/pgsty/vchord_bm25.git",
+            "web": "https://github.com/pgsty/vchord_bm25",
             "type": "git"
         }
     },
-    "generated_by": "TensorChord",
+    "generated_by": "PGSTY",
     "meta-spec": {
         "version": "1.0.0",
         "url": "http://pgxn.org/meta/spec.txt"

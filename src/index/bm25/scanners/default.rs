@@ -3,6 +3,8 @@
 // See <https://www.gnu.org/licenses/agpl-3.0.html> for details.
 //
 // Copyright (c) 2025-2026 TensorChord Inc.
+// Copyright (c) 2026 PGSTY PTE. LTD.
+// Maintained by Ruohang Feng @ PGSTY (rh@vonng.com)
 
 use crate::datatype::memory_tsvector::TsVectorOutput;
 use crate::datatype::tsvector::cast_tsvector_to_query;
