@@ -565,15 +565,6 @@ jobs:
     strategy:
       matrix:
         include:
-          # apt.postgresql.org has no s390x packages, so s390x uses Debian's own
-          # PostgreSQL: trixie ships 17. (Bookworm's 15 needs a bookworm s390x
-          # rootfs, which debuerreotype no longer publishes.)
-          - version: "17"
-            platform: "s390x"
-            clang_triple: "s390x-linux-gnu"
-            rust_triple: "s390x-unknown-linux-gnu"
-            gcc_version: "14"
-            debian_version: "trixie"
           - version: "14"
             platform: "ppc64le"
             clang_triple: "powerpc64le-linux-gnu"
