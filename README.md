@@ -1,12 +1,12 @@
 # vchord_bm25
 
 [![Website: vchord.pgsty.com](https://img.shields.io/badge/Website-vchord.pgsty.com-slategray?style=flat&logo=cilium&logoColor=white)](https://vchord.pgsty.com/)
-[![Docs: vchord_bm25](https://img.shields.io/badge/Docs-vchord__bm25-slategray?style=flat)](https://vchord.pgsty.com/docs/bm25/)
-[![Catalog: vchord_bm25](https://img.shields.io/badge/Catalog-vchord__bm25-%233E668F?style=flat&logo=postgresql&logoColor=white&labelColor=3E668F)](https://pgext.cloud/ext/vchord_bm25)
+[![Docs: bm25](https://img.shields.io/badge/Docs-bm25-slategray?style=flat)](https://vchord.pgsty.com/docs/bm25/)
+[![Catalog: bm25](https://img.shields.io/badge/Catalog-bm25-%233E668F?style=flat&logo=postgresql&logoColor=white&labelColor=3E668F)](https://pgext.cloud/ext/vchord_bm25)
 [![Version: v1.0.0](https://img.shields.io/badge/Version-v1.0.0-slategray?style=flat)](https://github.com/pgsty/vchord_bm25/releases)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-slategray?style=flat&logo=gnu&logoColor=white)](https://github.com/pgsty/vchord_bm25/blob/main/LICENSE)
 [![GitHub Stars](https://img.shields.io/github/stars/pgsty/vchord_bm25?style=flat&logo=github&logoColor=black&color=slategray)](https://star-history.com/#pgsty/vchord_bm25&Date)
-[![PostgreSQL: 14-18](https://img.shields.io/badge/PostgreSQL-14--18-%233E668F?style=flat&logo=postgresql&logoColor=white&labelColor=3E668F)](https://pgext.cloud/ext/vchord_bm25)
+[![PostgreSQL: 14-19](https://img.shields.io/badge/PostgreSQL-14--19-%233E668F?style=flat&logo=postgresql&logoColor=white&labelColor=3E668F)](https://pgext.cloud/ext/vchord_bm25)
 
 **`vchord_bm25`** is a PostgreSQL extension for native BM25 full-text ranking powered by the Block-WeakAnd (WAND) algorithm, designed to work alongside [`pg_tokenizer`](https://github.com/pgsty/pg_tokenizer) and [`vchord`](https://github.com/pgsty/vchord).
 
@@ -15,7 +15,17 @@
 > [!IMPORTANT]
 > **1.0.0** is the first PGSTY release. It indexes PostgreSQL's native `tsvector` and uses a new index format; it is not compatible with the `bm25vector` API or indexes of upstream 0.3.0. See [Migration from 0.3.0](#migration-from-030).
 
+---
 
+## Vchord Suite
+
+`vchord_bm25` is part of the **Vchord** extension family maintained by [PGSTY](https://pgsty.com):
+
+- **[`vchord`](https://github.com/pgsty/vchord)** ([Docs](https://vchord.pgsty.com/docs/vchord/) / [Meta](https://pgext.cloud/ext/vchord)): Scalable, high-performance, and disk-friendly vector similarity search.
+- **[`vchord_bm25`](https://github.com/pgsty/vchord_bm25)** ([Docs](https://vchord.pgsty.com/docs/bm25/) / [Meta](https://pgext.cloud/ext/vchord_bm25)): Native BM25 full-text ranking index (`Block-WeakAnd`).
+- **[`pg_tokenizer`](https://github.com/pgsty/pg_tokenizer)** ([Docs](https://vchord.pgsty.com/docs/tokenizer/) / [Meta](https://pgext.cloud/ext/pg_tokenizer)): Standalone multilingual text analyzer and vocabulary tokenizer.
+
+---
 
 ## Quick start from source
 
@@ -204,9 +214,7 @@ python tests/acceptance.py --pg-config /path/to/pg_config --slt --recovery
 
 It checks an independent BM25 formula, complete ordering, deferred retirement, real parallel workers, buffer work, insertion scaling, cancellation and crash/replay recovery. `--recovery` deliberately kills only backends in its own temporary cluster. It does not connect to your existing databases. ResourceOwner ownership is hardened; no failing-before reproducer for historical issue #1 has been established.
 
-## Vchord suite and documentation
-
-PGSTY maintains [`vchord`](https://github.com/pgsty/vchord) for vector search, [`vchord_bm25`](https://github.com/pgsty/vchord_bm25) for BM25 ranking, and [`pg_tokenizer`](https://github.com/pgsty/pg_tokenizer) for text analysis. BM25 and vector search results can be combined in SQL with Reciprocal Rank Fusion.
+## Documentation
 
 See the [BM25 docs](https://vchord.pgsty.com/docs/bm25/), [SQL reference](https://vchord.pgsty.com/docs/bm25/reference/sql/), [GUC reference](https://vchord.pgsty.com/docs/bm25/reference/gucs/), [migration guide](https://vchord.pgsty.com/docs/bm25/reference/migration/), and [tokenizer docs](https://vchord.pgsty.com/docs/tokenizer/). Historical 0.3.0 examples remain in the version-labeled site documentation.
 
