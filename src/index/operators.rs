@@ -29,7 +29,7 @@ unsafe fn heap_tuple_struct<T>(tuple: pg_sys::HeapTuple) -> *const T {
 fn am_oid_by_name(amname: &CStr) -> Option<Oid> {
     let tuple = unsafe {
         pg_sys::SearchSysCache1(
-            pg_sys::SysCacheIdentifier::AMNAME as i32,
+            pg_sys::SysCacheIdentifier::AMNAME as _,
             amname.into_datum()?,
         )
     };
@@ -47,7 +47,7 @@ fn am_oid_by_name(amname: &CStr) -> Option<Oid> {
 fn class_info(reloid: Oid) -> Option<ClassInfo> {
     let tuple = unsafe {
         pg_sys::SearchSysCache1(
-            pg_sys::SysCacheIdentifier::RELOID as i32,
+            pg_sys::SysCacheIdentifier::RELOID as _,
             reloid.into_datum()?,
         )
     };
@@ -121,9 +121,9 @@ pub(crate) fn check_index_permissions(index: Oid) {
     }
     // noError=true also rejects row_security=off; RLS_NONE_ENV permits actual
     // owner/BYPASSRLS exemptions, but RLS_ENABLED cannot expose global DF.
-    if unsafe { pg_sys::check_enable_rls(table, pg_sys::InvalidOid, true) }
-        == pg_sys::CheckEnableRlsResult::RLS_ENABLED as i32
-    {
+    // C enum constants are i32 on MSVC and u32 elsewhere.
+    let rls_enabled: i32 = pg_sys::CheckEnableRlsResult::RLS_ENABLED as _;
+    if unsafe { pg_sys::check_enable_rls(table, pg_sys::InvalidOid, true) } == rls_enabled {
         pgrx::ereport!(
             ERROR,
             pgrx::PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE,
