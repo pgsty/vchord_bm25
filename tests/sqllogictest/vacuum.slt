@@ -1,0 +1,89 @@
+# VACUUM must preserve term-frequency-based document lengths in sealed data.
+# Compare the index's ordering with scalar scoring after merging old and new
+# documents, including repeated terms and deleted rows.
+statement ok
+CREATE TABLE vacuum_documents (id integer PRIMARY KEY, vector tsvector);
+
+statement ok
+INSERT INTO vacuum_documents SELECT i, to_tsvector('simple', 'search ' || repeat('term ', i % 7 + 1) || i)
+FROM generate_series(1, 500) AS i;
+
+statement ok
+CREATE INDEX vacuum_documents_bm25 ON vacuum_documents USING bm25 (vector bm25_ops) WITH (limit = 1000);
+
+statement ok
+DELETE FROM vacuum_documents WHERE id % 2 = 0;
+
+statement ok
+INSERT INTO vacuum_documents SELECT i, to_tsvector('simple', 'search ' || repeat('term ', i % 11 + 1) || i)
+FROM generate_series(2, 500, 2) AS i;
+
+# Multiple eligible indexes exercise parallel VACUUM. BM25 maintenance does
+# not assign an XID or need an exclusive relation lock.
+statement ok
+CREATE INDEX vacuum_documents_mod ON vacuum_documents ((id % 10));
+
+statement ok
+SET min_parallel_index_scan_size = 0;
+
+statement ok
+VACUUM (PARALLEL 2, INDEX_CLEANUP ON) vacuum_documents;
+
+statement ok
+RESET min_parallel_index_scan_size;
+
+# A following pass can recycle the retired segment when its horizon permits.
+statement ok
+VACUUM (PARALLEL 0, ANALYZE, INDEX_CLEANUP ON) vacuum_documents;
+
+statement ok
+SET enable_seqscan = off;
+
+statement ok
+SET enable_sort = off;
+
+statement ok
+CREATE TEMP TABLE vacuum_indexed AS SELECT array_agg(id) AS ids FROM (
+  SELECT id FROM vacuum_documents
+  ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'search term'), 'vacuum_documents_bm25'), id
+  LIMIT 100
+) AS ranked;
+
+statement ok
+RESET enable_seqscan;
+
+statement ok
+RESET enable_sort;
+
+statement ok
+SET bm25.enable_scan = off;
+
+query I
+SELECT (ids = (SELECT array_agg(id) FROM (
+  SELECT id FROM vacuum_documents
+  ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'search term'), 'vacuum_documents_bm25'), id
+  LIMIT 100
+) AS ranked))::int FROM vacuum_indexed;
+----
+1
+
+# A second maintenance pass must not alter scalar scores either.
+statement ok
+CREATE TEMP TABLE vacuum_scores AS SELECT id,
+vector <&> to_bm25query(to_tsvector('simple', 'search term'), 'vacuum_documents_bm25') AS score
+FROM vacuum_documents;
+
+statement ok
+VACUUM (PARALLEL 0, ANALYZE, INDEX_CLEANUP ON) vacuum_documents;
+
+query I
+SELECT count(*) FROM vacuum_documents d JOIN vacuum_scores s USING (id)
+WHERE s.score <> d.vector <&> to_bm25query(to_tsvector('simple', 'search term'), 'vacuum_documents_bm25');
+----
+0
+
+statement ok
+RESET bm25.enable_scan;
+
+statement ok
+DROP TABLE vacuum_indexed, vacuum_scores, vacuum_documents;

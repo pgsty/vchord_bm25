@@ -1,0 +1,83 @@
+# A growing segment can change avgdl. Sealed WAND summaries must not prune a
+# sealed document with a score that is larger under the merged statistics.
+statement ok
+CREATE TABLE wand_growth_documents (id integer PRIMARY KEY, vector tsvector);
+
+statement ok
+INSERT INTO wand_growth_documents VALUES
+    (1, to_tsvector('simple', 'alpha')),
+    (2, to_tsvector('simple', 'alpha alpha b b')),
+    (3, to_tsvector('simple', repeat('b ', 7)));
+
+statement ok
+CREATE INDEX wand_growth_documents_bm25
+ON wand_growth_documents USING bm25 (vector bm25_ops)
+WITH (limit = 2);
+
+statement ok
+INSERT INTO wand_growth_documents VALUES
+    (4, to_tsvector('simple', 'alpha alpha')),
+    (5, to_tsvector('simple', repeat('b ', 28)));
+
+statement ok
+SET enable_seqscan = off;
+
+statement ok
+SET enable_sort = off;
+
+statement ok
+SET "bm25.limit" = 2;
+
+query I
+SELECT id
+FROM wand_growth_documents
+WHERE vector @@ to_tsquery('simple', 'alpha')
+ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'alpha'), 'wand_growth_documents_bm25'), id
+LIMIT 2;
+----
+4
+2
+
+# The scalar path is the reference ordering for the same merged statistics.
+statement ok
+SET bm25.enable_scan = off;
+
+statement ok
+SET enable_seqscan = on;
+
+statement ok
+SET enable_indexscan = off;
+
+statement ok
+SET enable_bitmapscan = off;
+
+statement ok
+SET enable_sort = on;
+
+query I
+SELECT id
+FROM wand_growth_documents
+WHERE vector @@ to_tsquery('simple', 'alpha')
+ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'alpha'), 'wand_growth_documents_bm25'), id
+LIMIT 2;
+----
+4
+2
+
+statement ok
+DROP TABLE wand_growth_documents;
+
+statement ok
+RESET bm25.enable_scan;
+
+statement ok
+RESET enable_bitmapscan;
+
+statement ok
+RESET enable_indexscan;
+
+statement ok
+RESET enable_sort;
+
+statement ok
+RESET enable_seqscan;

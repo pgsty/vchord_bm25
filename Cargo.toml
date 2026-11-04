@@ -16,6 +16,7 @@ pg15 = ["pgrx/pg15"]
 pg16 = ["pgrx/pg16"]
 pg17 = ["pgrx/pg17"]
 pg18 = ["pgrx/pg18"]
+pg19 = ["pgrx/pg19"]
 
 [dependencies]
 always_equal = { path = "./crates/always_equal" }
@@ -41,7 +42,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.0.0"
+version = "1.0.0"
 edition = "2024"
 
 [workspace.dependencies]

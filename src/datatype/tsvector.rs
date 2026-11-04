@@ -79,7 +79,17 @@ pub fn cast_tsvector_to_document(seed: &[u8; 32], tsvector: TsVectorBorrowed<'_>
     let mut internal = Vec::new();
     for (string, count) in tsvector.iter() {
         let key = intern(seed, string);
-        let value: u32 = count.expect("tsvector must have positions").into();
+        let Some(count) = count else {
+            pgrx::pg_sys::panic::ErrorReport::new(
+                pgrx::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+                "tsvector must have positions",
+                "cast_tsvector_to_document",
+            )
+            .set_hint("Create documents with to_tsvector(); do not strip positional information.")
+            .report(pgrx::pg_sys::elog::PgLogLevel::ERROR);
+            unreachable!();
+        };
+        let value: u32 = count.into();
         internal.push(Element { key, value });
     }
     internal.sort_unstable_by(|Element { key: l, .. }, Element { key: r, .. }| Ord::cmp(l, r));

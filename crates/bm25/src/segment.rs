@@ -12,7 +12,7 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 #[repr(C, packed(2))]
 #[derive(Debug, Clone, FromBytes, IntoBytes, Immutable, KnownLayout)]
-pub struct Record(pub u32, pub [u16; 3]);
+pub struct Record(pub u32, pub [u16; 3], pub u16);
 
 #[repr(C)]
 #[derive(Debug, Clone, FromBytes, IntoBytes, Immutable, KnownLayout)]

@@ -18,6 +18,7 @@ pub fn build<R: RelationWrite, D, M>(
     index: &R,
     seed: [u8; 32],
     segment: Segment<D, M>,
+    check: &impl Fn(),
 ) where
     R::Page: Page<Opaque = Opaque>,
     D: IntoIterator<Item = Record>,
@@ -26,14 +27,17 @@ pub fn build<R: RelationWrite, D, M>(
     let k1 = bm25_options.k1;
     let b = bm25_options.b;
 
-    let mut meta = TapeWriter::<_, MetaTuple>::create(index);
+    let meta = TapeWriter::<_, MetaTuple>::create(index, 0);
     assert_eq!(meta.first(), 0);
 
-    let flushed = crate::flush::flush(bm25_options.k1, bm25_options.b, index, segment);
+    drop(meta);
 
-    let tape_vectors = TapeWriter::<_, VectorTuple>::create(index);
+    let flushed = crate::flush::flush(bm25_options.k1, bm25_options.b, index, segment, 0, check);
 
-    let mut tape_jump = TapeWriter::<_, JumpTuple>::create(index);
+    let tape_vectors = TapeWriter::<_, VectorTuple>::create(index, 0);
+
+    let tail_hint = tape_vectors.first();
+    let mut tape_jump = TapeWriter::<_, JumpTuple>::create(index, 0);
     let ptr_jump = tape_jump.push(JumpTuple {
         ptr_vectors: { tape_vectors }.first(),
         number_of_documents: flushed.number_of_documents,
@@ -50,15 +54,26 @@ pub fn build<R: RelationWrite, D, M>(
         ptr_tokens: flushed.ptr_tokens,
         ptr_summaries: flushed.ptr_summaries,
         ptr_blocks: flushed.ptr_blocks,
+        generation: 0,
+        safexid: 0,
+        graveyard_vectors: u32::MAX,
+        graveyard_vectors_end: u32::MAX,
+        graveyard_documents: u32::MAX,
+        graveyard_tokens: u32::MAX,
+        graveyard_summaries: u32::MAX,
+        graveyard_blocks: u32::MAX,
+        graveyard_free_documents: u32::MAX,
+        graveyard_free_tokens: u32::MAX,
+        ptr_vectors_offset: 1,
+        tail_hint,
+        number_of_nulls: flushed.number_of_nulls,
     });
     assert_eq!(ptr_jump.1, 1);
 
-    let tape_lock = TapeWriter::<_, ()>::create(index);
-
+    let mut meta = TapeWriter::from_guard(index, index.write(0), 0);
     meta.push(MetaTuple {
         k1,
         b,
-        ptr_lock: { tape_lock }.first(),
         ptr_jump: ptr_jump.0,
         seed,
     });

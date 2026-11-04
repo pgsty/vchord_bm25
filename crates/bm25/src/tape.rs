@@ -16,9 +16,11 @@ pub struct TapeWriter<'a, R, T>
 where
     R: RelationWrite + 'a,
 {
-    head: R::WriteGuard<'a>,
+    head: Option<R::WriteGuard<'a>>,
+    current: u32,
     first: u32,
     index: &'a R,
+    generation: u64,
     _phantom: PhantomData<fn(T) -> T>,
 }
 
@@ -27,44 +29,67 @@ where
     R: RelationWrite + 'a,
     R::Page: Page<Opaque = Opaque>,
 {
-    pub fn create(index: &'a R) -> Self {
+    pub fn create(index: &'a R, generation: u64) -> Self {
         let head = index.alloc(Opaque {
             next: u32::MAX,
             flags: 0,
+            generation,
         });
         let first = head.id();
         Self {
-            head,
+            head: Some(head),
+            current: first,
             first,
             index,
+            generation,
             _phantom: PhantomData,
         }
     }
-    pub fn from_guard(index: &'a R, head: R::WriteGuard<'a>) -> Self {
+    pub fn from_guard(index: &'a R, head: R::WriteGuard<'a>, generation: u64) -> Self {
         let first = head.id();
         Self {
-            head,
+            head: Some(head),
+            current: first,
             first,
             index,
+            generation,
             _phantom: PhantomData,
         }
+    }
+    pub fn finish(self) -> u32 {
+        self.current
+    }
+    // Only unpublished output tapes may release their locks mid-stream.
+    pub fn release(&mut self) {
+        self.head.take();
+    }
+    pub fn acquire(&mut self) {
+        self.head = Some(self.index.write(self.current));
+    }
+    pub fn checkpoint(&mut self, check: &impl Fn()) {
+        self.release();
+        check();
+        self.acquire();
     }
     pub fn first(&self) -> u32 {
         self.first
     }
     pub fn freespace(&self) -> u16 {
-        self.head.freespace()
+        self.head.as_ref().unwrap().freespace()
     }
     pub fn tape_move(&mut self) {
-        if self.head.len() == 0 {
+        if self.head.as_ref().unwrap().len() == 0 {
             panic!("implementation: a clear page cannot accommodate a single tuple");
         }
         let next = self.index.alloc(Opaque {
             next: u32::MAX,
             flags: 0,
+            generation: self.generation,
         });
-        self.head.get_opaque_mut().next = next.id();
-        self.head = next;
+        self.current = next.id();
+        let mut old = self.head.take().unwrap();
+        old.get_opaque_mut().next = self.current;
+        self.head = Some(self.index.commit_pair(old, next));
     }
 }
 
@@ -76,17 +101,12 @@ where
 {
     pub fn push(&mut self, x: T) -> (u32, u16) {
         let bytes = T::serialize(&x);
-        if let Some(i) = self.head.alloc(&bytes) {
-            (self.head.id(), i)
+        if let Some(i) = self.head.as_mut().unwrap().alloc(&bytes) {
+            (self.current, i)
         } else {
-            let next = self.index.alloc(Opaque {
-                next: u32::MAX,
-                flags: 0,
-            });
-            self.head.get_opaque_mut().next = next.id();
-            self.head = next;
-            if let Some(i) = self.head.alloc(&bytes) {
-                (self.head.id(), i)
+            self.tape_move();
+            if let Some(i) = self.head.as_mut().unwrap().alloc(&bytes) {
+                (self.current, i)
             } else {
                 panic!("implementation: a free page cannot accommodate a single tuple")
             }
@@ -94,8 +114,8 @@ where
     }
     pub fn tape_put(&mut self, x: T) -> (u32, u16) {
         let bytes = T::serialize(&x);
-        if let Some(i) = self.head.alloc(&bytes) {
-            (self.head.id(), i)
+        if let Some(i) = self.head.as_mut().unwrap().alloc(&bytes) {
+            (self.current, i)
         } else {
             panic!("implementation: a free page cannot accommodate a single tuple")
         }
@@ -108,6 +128,7 @@ where
 {
     head: R::WriteGuard<'a>,
     index: &'a R,
+    generation: u64,
     _phantom: PhantomData<fn(T) -> T>,
 }
 
@@ -116,15 +137,34 @@ where
     R: RelationWrite + 'a,
     R::Page: Page<Opaque = Opaque>,
 {
-    pub fn create(index: &'a R) -> Self {
+    pub fn create(index: &'a R, generation: u64) -> Self {
         let head = index.alloc(Opaque {
             next: u32::MAX,
             flags: 0,
+            generation,
         });
         Self {
             head,
             index,
+            generation,
             _phantom: PhantomData,
+        }
+    }
+    pub fn checkpoint(self, check: &impl Fn()) -> Self {
+        let Self {
+            head,
+            index,
+            generation,
+            _phantom,
+        } = self;
+        let id = head.id();
+        drop(head);
+        check();
+        Self {
+            head: index.write(id),
+            index,
+            generation,
+            _phantom,
         }
     }
     pub fn into_head(self) -> R::WriteGuard<'a> {
@@ -140,6 +180,7 @@ where
         self.head = self.index.alloc(Opaque {
             next: self.head.id(),
             flags: 0,
+            generation: self.generation,
         });
     }
 }

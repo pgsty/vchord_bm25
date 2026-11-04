@@ -41,7 +41,7 @@ WITH results AS (
 )
 SELECT COUNT(1) FROM results;
 ----
-2
+5
 
 statement ok
 SET bm25.prefilter = on;
@@ -57,7 +57,7 @@ WITH results AS (
 )
 SELECT COUNT(1) FROM results;
 ----
-3
+5
 
 statement ok
 DROP TABLE documents;

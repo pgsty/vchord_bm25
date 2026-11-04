@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -e
+set -eo pipefail
 
 mkdir -p $(dirname "$0")/../target/tools
 
@@ -20,16 +20,21 @@ for arg in "$@"; do
     if [ "$prev_arg" = "" ]; then
         x=$(realpath "$(dirname "$0")/../sql/install/vchord_bm25--${arg}.sql")
     else
-        x=$(realpath "$(dirname "$0")/../sql/vchord_bm25--${prev_arg}--${arg}.sql")
+        x=$(realpath "$(dirname "$0")/../sql/upgrade/vchord_bm25--${prev_arg}--${arg}.sql")
     fi
     prev_arg=$arg
     f+=("$x")
 done
 
-so=$(realpath $(dirname "$0")/../target/tools/vchord_bm25.so)
-$(dirname "$0")/dump-codegen.sh | gcc -I $(pg_config --includedir-server) -fPIC -shared -o $so -x c -
+so=$(cd "$(dirname "$0")/../target/tools" && pwd)/vchord_bm25.so
+cc_args=($(pg_config --cppflags))
+if [ "$(uname -s)" = "Darwin" ]; then
+    cc_args+=(-Wl,-undefined,dynamic_lookup)
+fi
+$(dirname "$0")/dump-codegen.sh | gcc "${cc_args[@]}" -I "$(pg_config --includedir-server)" -fPIC -shared -o "$so" -x c -
 
 sql=$(mktemp)
+trap 'rm -f "$sql"' EXIT
 echo "BEGIN;" >> $sql
 echo "CREATE SCHEMA vchord_bm25;" >> $sql
 echo "SET LOCAL search_path TO vchord_bm25,public;" >> $sql
@@ -40,6 +45,6 @@ cat ${f[@]} \
     >> $sql
 echo "END;" >> $sql
 
-psql -d vchord_bm25 -f $sql 1>&2
+psql -X -v ON_ERROR_STOP=1 -d vchord_bm25 -f "$sql" 1>&2
 pg_dump -s -d vchord_bm25
-psql -d vchord_bm25 -c "DROP SCHEMA IF EXISTS vchord_bm25 CASCADE;" 1>&2
+psql -X -v ON_ERROR_STOP=1 -d vchord_bm25 -c "DROP SCHEMA IF EXISTS vchord_bm25 CASCADE;" 1>&2

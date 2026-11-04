@@ -1,0 +1,32 @@
+# Empty indexes must remain searchable, and indexed documents must carry
+# positional information so term frequencies are available to BM25.
+statement ok
+CREATE TABLE edge_documents (id integer, vector tsvector);
+
+statement ok
+CREATE INDEX edge_documents_bm25
+ON edge_documents USING bm25 (vector bm25_ops)
+WITH (limit = 10);
+
+statement ok
+SET enable_seqscan = off;
+
+query I
+SELECT count(*)
+FROM (
+    SELECT id
+    FROM edge_documents
+    ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'query'), 'edge_documents_bm25')
+    LIMIT 10
+) AS results;
+----
+0
+
+statement error tsvector must have positions
+INSERT INTO edge_documents VALUES (1, strip(to_tsvector('simple', 'query query')));
+
+statement ok
+DROP TABLE edge_documents;
+
+statement ok
+RESET enable_seqscan;

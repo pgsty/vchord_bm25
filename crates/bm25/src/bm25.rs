@@ -325,6 +325,7 @@ impl Wand {
     }
 }
 
+#[derive(Clone)]
 pub struct Cache {
     s0: f64,
     s1: [f64; 256],
@@ -338,6 +339,7 @@ impl Cache {
         b: f64,
         avgdl: f64,
     ) -> Self {
+        let avgdl = if avgdl > 0.0 { avgdl } else { 1.0 };
         Self {
             s0: idf(number_of_documents, token_number_of_documents) * (k1 + 1.0),
             s1: std::array::from_fn(|fieldnorm| {

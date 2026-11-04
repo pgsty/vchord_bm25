@@ -1,0 +1,134 @@
+# Natural plans: never disable sequential scans for ranking assertions.
+statement ok
+CREATE TABLE cost_documents (id integer PRIMARY KEY, vector tsvector);
+
+statement ok
+INSERT INTO cost_documents SELECT i, to_tsvector('simple', 'search term ' || i) FROM generate_series(1, 50000) AS i;
+
+statement ok
+CREATE INDEX cost_documents_bm25 ON cost_documents USING bm25 (vector bm25_ops);
+
+statement ok
+VACUUM (ANALYZE) cost_documents;
+
+statement ok
+CREATE FUNCTION bm25_test_plan(query text) RETURNS jsonb LANGUAGE plpgsql AS $$
+DECLARE result jsonb;
+BEGIN
+    EXECUTE 'EXPLAIN (FORMAT JSON) ' || query INTO result;
+    RETURN result->0->'Plan';
+END
+$$;
+
+query I
+SELECT (bm25_test_plan($q$
+SELECT id FROM cost_documents ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'search'), 'cost_documents_bm25') LIMIT 10
+$q$)::text LIKE '%"Index Name": "cost_documents_bm25"%')::int;
+----
+1
+
+statement ok
+INSERT INTO cost_documents SELECT i, to_tsvector('simple', 'search extra ' || i) FROM generate_series(50001, 56000) AS i;
+
+statement ok
+VACUUM (ANALYZE) cost_documents;
+
+query I
+SELECT (bm25_test_plan($q$
+SELECT id FROM cost_documents ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'search'), 'cost_documents_bm25') LIMIT 10
+$q$)::text LIKE '%"Index Name": "cost_documents_bm25"%')::int;
+----
+1
+
+# A selective B-tree must remain competitive, even with a high scalar COST.
+query I
+SELECT (bm25_test_plan($q$
+SELECT id FROM cost_documents WHERE id = 1 ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'search'), 'cost_documents_bm25') LIMIT 10
+$q$)::text LIKE '%"Index Name": "cost_documents_pkey"%')::int;
+----
+1
+
+statement ok
+SET bm25.enable_scan = off;
+
+query I
+SELECT (bm25_test_plan($q$
+SELECT id FROM cost_documents ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'search'), 'cost_documents_bm25') LIMIT 10
+$q$)::text NOT LIKE '%"Index Name": "cost_documents_bm25"%')::int;
+----
+1
+
+statement ok
+RESET bm25.enable_scan;
+
+# PG18 disabled-node ordering must not choose an unsupported unordered scan.
+statement ok
+CREATE TABLE no_order (v tsvector);
+
+statement ok
+CREATE INDEX no_order_bm ON no_order USING bm25(v bm25_ops);
+
+statement ok
+INSERT INTO no_order VALUES('alpha:1'),(NULL);
+
+statement ok
+SET enable_seqscan = off;
+
+query I
+SELECT count(*) FROM no_order;
+----
+2
+
+statement ok
+RESET enable_seqscan;
+
+# Two ORDER BY keys cannot be served by one BM25 scan; never plan it, even
+# when sequential scans are disabled.
+statement ok
+SET enable_seqscan = off;
+
+query I
+SELECT count(*) FROM (
+  SELECT id FROM cost_documents
+  ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'search'), 'cost_documents_bm25'),
+           vector <&> to_bm25query(to_tsvector('simple', 'term'), 'cost_documents_bm25')
+  LIMIT 5
+) AS ranked;
+----
+5
+
+statement ok
+RESET enable_seqscan;
+
+# to_bm25query() is not inlined; a generic plan with a constant target index
+# and a parameterized query vector still uses the index.
+statement ok
+SET plan_cache_mode = force_generic_plan;
+
+statement ok
+PREPARE bm25_generic(text) AS
+SELECT id FROM cost_documents ORDER BY vector <&> to_bm25query(to_tsvector('simple', $1), 'cost_documents_bm25') LIMIT 10;
+
+query I
+SELECT (bm25_test_plan($q$EXECUTE bm25_generic('search')$q$)::text LIKE '%"Index Name": "cost_documents_bm25"%')::int;
+----
+1
+
+statement ok
+DEALLOCATE bm25_generic;
+
+statement ok
+RESET plan_cache_mode;
+
+# A zero score is +0, not -0.
+query T
+SELECT (vector <&> to_bm25query(to_tsvector('simple', 'nosuchterm'), 'cost_documents_bm25'))::text
+FROM cost_documents WHERE id = 1;
+----
+0
+
+statement ok
+DROP FUNCTION bm25_test_plan(text);
+
+statement ok
+DROP TABLE cost_documents, no_order;

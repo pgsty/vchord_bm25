@@ -32,6 +32,14 @@ LIMIT 10;
 ----
 8
 9
+4
+1
+7
+2
+3
+5
+6
+10
 
 statement ok
 SET "bm25.limit" TO '3';
@@ -45,6 +53,13 @@ LIMIT 10;
 8
 9
 4
+1
+7
+2
+3
+5
+6
+10
 
 statement ok
 ALTER INDEX documents_passage_bm25 SET (limit = '1');
@@ -58,6 +73,13 @@ LIMIT 10;
 8
 9
 4
+1
+7
+2
+3
+5
+6
+10
 
 statement ok
 SET "bm25.limit" TO DEFAULT;
@@ -69,6 +91,15 @@ ORDER BY to_tsvector('english', passage) <&> to_bm25query(to_tsvector('english',
 LIMIT 10;
 ----
 8
+9
+4
+1
+7
+2
+3
+5
+6
+10
 
 statement ok
 ALTER INDEX documents_passage_bm25 SET (prefilter = on);
@@ -81,6 +112,62 @@ ORDER BY to_tsvector('english', passage) <&> to_bm25query(to_tsvector('english',
 LIMIT 10;
 ----
 9
+4
+1
+7
+2
+3
+5
+6
+10
+
+# Explicit zero chooses an automatic batch of 100; all settings return complete results.
+statement ok
+SET "bm25.limit" = 0;
+
+query I
+SELECT id FROM documents
+ORDER BY to_tsvector('english', passage) <&> to_bm25query(to_tsvector('english', 'PostgreSQL'), 'documents_passage_bm25')
+LIMIT 10;
+----
+8
+9
+4
+1
+7
+2
+3
+5
+6
+10
+
+statement ok
+RESET "bm25.limit";
+
+statement ok
+SET bm25.prefilter = off;
+
+query I
+SELECT count(*) FROM (
+SELECT id FROM documents WHERE id <> 8
+ORDER BY to_tsvector('english', passage) <&> to_bm25query(to_tsvector('english', 'PostgreSQL'), 'documents_passage_bm25')
+LIMIT 10) AS results;
+----
+9
+
+statement ok
+RESET bm25.prefilter;
+
+query I
+SELECT count(*) FROM (
+SELECT id FROM documents WHERE id <> 8
+ORDER BY to_tsvector('english', passage) <&> to_bm25query(to_tsvector('english', 'PostgreSQL'), 'documents_passage_bm25')
+LIMIT 10) AS results;
+----
+9
 
 statement ok
 DROP TABLE documents;
+
+statement ok
+RESET enable_seqscan;

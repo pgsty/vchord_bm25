@@ -152,7 +152,12 @@ pub unsafe extern "C-unwind" fn ambuild(
                 index_relation,
                 heap_relation,
                 index_info,
-                pgrx::pg_sys::table_beginscan_parallel(heap_relation, leader.tablescandesc),
+                pgrx::pg_sys::table_beginscan_parallel(
+                    heap_relation,
+                    leader.tablescandesc,
+                    #[cfg(feature = "pg19")]
+                    0,
+                ),
                 (*leader.bm25shared).seed,
                 parse_path(leader.path),
                 || {
@@ -304,7 +309,9 @@ pub unsafe extern "C-unwind" fn ambuild(
     reporter.phase(BuildPhase::from_code(BuildPhaseCode::Writing));
     let index = unsafe { PostgresRelation::new(index_relation) };
     let segment = bm25::io::readers(tempdir.path(), total);
-    bm25::build(bm25_options.index, &index, seed, segment);
+    bm25::build(bm25_options.index, &index, seed, segment, &|| {
+        pgrx::pg_sys::check_for_interrupts!();
+    });
     unsafe { pgrx::pgbox::PgBox::<pgrx::pg_sys::IndexBuildResult>::alloc0().into_pg() }
 }
 
@@ -565,15 +572,17 @@ pub unsafe extern "C-unwind" fn bm25_parallel_build_main(
             .cast::<pgrx::pg_sys::ParallelTableScanDescData>()
     };
     let path = unsafe { pgrx::pg_sys::shm_toc_lookup(toc, 0xA000000000000003, false).cast::<u8>() };
-    let heap_lockmode;
-    let index_lockmode;
-    if unsafe { !(*bm25shared).isconcurrent } {
-        heap_lockmode = pgrx::pg_sys::ShareLock as pgrx::pg_sys::LOCKMODE;
-        index_lockmode = pgrx::pg_sys::AccessExclusiveLock as pgrx::pg_sys::LOCKMODE;
+    let (heap_lockmode, index_lockmode) = if unsafe { !(*bm25shared).isconcurrent } {
+        (
+            pgrx::pg_sys::ShareLock as _,
+            pgrx::pg_sys::AccessExclusiveLock as _,
+        )
     } else {
-        heap_lockmode = pgrx::pg_sys::ShareUpdateExclusiveLock as pgrx::pg_sys::LOCKMODE;
-        index_lockmode = pgrx::pg_sys::RowExclusiveLock as pgrx::pg_sys::LOCKMODE;
-    }
+        (
+            pgrx::pg_sys::ShareUpdateExclusiveLock as _,
+            pgrx::pg_sys::RowExclusiveLock as _,
+        )
+    };
     let heap_relation = unsafe { pgrx::pg_sys::table_open((*bm25shared).heaprelid, heap_lockmode) };
     let index_relation =
         unsafe { pgrx::pg_sys::index_open((*bm25shared).indexrelid, index_lockmode) };
@@ -587,7 +596,12 @@ pub unsafe extern "C-unwind" fn bm25_parallel_build_main(
             index_relation,
             heap_relation,
             index_info,
-            pgrx::pg_sys::table_beginscan_parallel(heap_relation, tablescandesc),
+            pgrx::pg_sys::table_beginscan_parallel(
+                heap_relation,
+                tablescandesc,
+                #[cfg(feature = "pg19")]
+                0,
+            ),
             (*bm25shared).seed,
             parse_path(path),
             || {
@@ -715,7 +729,8 @@ unsafe fn build(
             let vector = unsafe { TsVectorInput::from_datum(datum, false).unwrap() };
             Some(cast_tsvector_to_document(&seed, vector.as_borrowed()))
         };
-        if let Some(document) = document {
+        {
+            let document = document.unwrap_or_else(bm25::vector::Document::null);
             bm25::io::write(
                 &mut records_writer,
                 &mut mappings_writer,
@@ -734,7 +749,9 @@ unsafe fn build(
     mappings_writer.flush();
     drop(records_writer);
     drop(mappings_writer);
-    bm25::io::locally_merge(path, order);
+    bm25::io::locally_merge(path, order, &|| {
+        pgrx::pg_sys::check_for_interrupts!();
+    });
 
     sync_2();
 }
@@ -748,7 +765,7 @@ unsafe fn options(index_relation: pgrx::pg_sys::Relation) -> Bm25IndexingOptions
     let att = unsafe { &mut *(*index_relation).rd_att };
     #[cfg(any(feature = "pg14", feature = "pg15", feature = "pg16", feature = "pg17"))]
     let atts = unsafe { att.attrs.as_slice(att.natts as _) };
-    #[cfg(feature = "pg18")]
+    #[cfg(any(feature = "pg18", feature = "pg19"))]
     let atts = unsafe {
         let ptr = att
             .compact_attrs

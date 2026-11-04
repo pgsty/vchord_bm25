@@ -39,6 +39,10 @@ LIMIT 10;
 1
 7
 2
+3
+5
+6
+10
 
 statement ok
 DROP TABLE documents;

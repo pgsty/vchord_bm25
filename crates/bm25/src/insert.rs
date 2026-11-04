@@ -9,7 +9,7 @@
 use crate::Opaque;
 use crate::bm25::length_to_fieldnorm;
 use crate::tape::TapeWriter;
-use crate::tuples::{JumpTuple, MetaTuple, VectorTuple, WithReader};
+use crate::tuples::{JumpTuple, MetaTuple, VectorTuple, WithReader, WithWriter};
 use crate::vector::Document;
 use index::relation::{Page, RelationRead, RelationWrite};
 use index::tuples::Bool;
@@ -27,11 +27,14 @@ where
     let ptr_jump = meta_tuple.ptr_jump();
     drop(meta_guard);
 
+    // Hold the jump page until the document is appended: publication waits
+    // for it, so every page stamped here belongs to the published generation.
     let jump_guard = index.read(ptr_jump);
     let jump_bytes = jump_guard.get(1).expect("data corruption");
     let jump_tuple = JumpTuple::deserialize_ref(jump_bytes);
+    let generation = jump_tuple.generation();
 
-    let first = jump_tuple.ptr_vectors();
+    let first = jump_tuple.tail_hint();
     let mut current = first;
     let head = loop {
         let read = index.read(current);
@@ -47,8 +50,11 @@ where
         }
     };
 
-    let mut tape = TapeWriter::from_guard(index, head);
-    tape.push(VectorTuple::_2 { fieldnorm });
+    let mut tape = TapeWriter::from_guard(index, head, generation);
+    tape.push(VectorTuple::_2 {
+        fieldnorm,
+        is_null: Bool::from(document.is_null()),
+    });
     let mut remain = document.as_slice();
     loop {
         let freespace = tape.freespace();
@@ -68,6 +74,15 @@ where
             remain = right;
         } else {
             tape.tape_move();
+        }
+    }
+    let tail = tape.finish();
+    drop(jump_guard);
+    if tail != first {
+        let mut guard = index.write(ptr_jump);
+        let mut jump = JumpTuple::deserialize_mut(guard.get_mut(1).expect("data corruption"));
+        if *jump.generation() == generation && *jump.tail_hint() == first {
+            *jump.tail_hint() = tail;
         }
     }
 }

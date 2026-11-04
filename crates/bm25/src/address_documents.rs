@@ -17,11 +17,16 @@ use std::cmp::Ordering;
 // * On each page, tuples must be contiguous and ordered, starting from `1`.
 // * The first `n` pages must contain the same number of tuples.
 
-pub fn write<R: RelationWrite>(index: &R, elements: &[(u32, u16)]) -> (u16, u16, u32, u32, u32)
+pub fn write<R: RelationWrite>(
+    index: &R,
+    elements: &[(u32, u16)],
+    generation: u64,
+    check: &impl Fn(),
+) -> (u16, u16, u32, u32, u32)
 where
     R::Page: Page<Opaque = Opaque>,
 {
-    let mut tape = BackwardTapeWriter::<_, AddressDocumentsTuple>::create(index);
+    let mut tape = BackwardTapeWriter::<_, AddressDocumentsTuple>::create(index, generation);
     let width_1 = AddressDocumentsTuple::fit(tape.freespace())
         .expect("implementation: a blank page cannot fit a single tuple") as u16;
     let width_0 = {
@@ -57,6 +62,7 @@ where
             };
             buffer.push(tape.tape_put(tuple).0);
             tape.tape_move();
+            tape = tape.checkpoint(check);
         }
     }
     let start = buffer.first().copied().unwrap_or(u32::MAX);

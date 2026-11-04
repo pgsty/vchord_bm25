@@ -15,92 +15,68 @@ pub fn bulkdelete<R: RelationRead + RelationWrite>(
     index: &R,
     check: impl Fn(),
     callback: impl Fn([u16; 3]) -> bool,
-) where
+) -> u64
+where
     R::Page: Page<Opaque = Opaque>,
 {
-    let meta_guard = index.read(0);
-    let meta_bytes = meta_guard.get(1).expect("data corruption");
-    let meta_tuple = MetaTuple::deserialize_ref(meta_bytes);
-    let ptr_lock = meta_tuple.ptr_lock();
-    let ptr_jump = meta_tuple.ptr_jump();
-    drop(meta_guard);
-
-    let _lock_guard = index.read(ptr_lock);
-
-    let jump_guard = index.read(ptr_jump);
-    let jump_bytes = jump_guard.get(1).expect("data corruption");
-    let jump_tuple = JumpTuple::deserialize_ref(jump_bytes);
-
-    {
-        let first = jump_tuple.ptr_vectors();
-        assert!(first != u32::MAX);
-        let mut current = first;
-        while current != u32::MAX {
-            check();
-            let read = index.read(current);
-            let flag = 'flag: {
-                for i in 1..=read.len() {
-                    let vector_bytes = read.get(i).expect("data corruption");
-                    let vector_tuple = VectorTuple::deserialize_ref(vector_bytes);
-                    if let VectorTupleReader::_0(vector_tuple) = vector_tuple {
-                        if !bool::from(vector_tuple.deleted()) && callback(vector_tuple.payload()) {
-                            break 'flag true;
+    let ptr_jump = {
+        let g = index.read(0);
+        MetaTuple::deserialize_ref(g.get(1).expect("data corruption")).ptr_jump()
+    };
+    let (vectors, offset, documents) = {
+        let g = index.read(ptr_jump);
+        let j = JumpTuple::deserialize_ref(g.get(1).expect("data corruption"));
+        (j.ptr_vectors(), j.ptr_vectors_offset(), j.ptr_documents())
+    };
+    let mut removed = 0_u64;
+    for (mut page, mut start, growing) in [(vectors, offset, true), (documents, 1, false)] {
+        while page != u32::MAX {
+            let (next, candidates) = {
+                let g = index.read(page);
+                let mut candidates = Vec::new();
+                for i in start..=g.len() {
+                    let bytes = g.get(i).expect("data corruption");
+                    let entry = if growing {
+                        match VectorTuple::deserialize_ref(bytes) {
+                            VectorTupleReader::_0(t) => Some((t.deleted(), t.payload())),
+                            _ => None,
+                        }
+                    } else {
+                        let t = DocumentTuple::deserialize_ref(bytes);
+                        Some((t.deleted(), t.payload()))
+                    };
+                    if let Some((deleted, payload)) = entry {
+                        if !bool::from(deleted) {
+                            candidates.push((i, payload));
                         }
                     }
                 }
-                false
+                (g.get_opaque().next, candidates)
             };
-            if flag {
-                drop(read);
-                let mut write = index.write(current);
-                for i in 1..=write.len() {
-                    let vector_bytes = write.get_mut(i).expect("data corruption");
-                    let vector_tuple = VectorTuple::deserialize_mut(vector_bytes);
-                    if let VectorTupleWriter::_0(mut vector_tuple) = vector_tuple {
-                        if !bool::from(*vector_tuple.deleted()) && callback(*vector_tuple.payload())
-                        {
-                            *vector_tuple.deleted() = Bool::TRUE;
-                        }
+            let offsets = candidates
+                .into_iter()
+                .filter_map(|(i, tid)| callback(tid).then_some(i))
+                .collect::<Vec<_>>();
+            if !offsets.is_empty() {
+                let mut g = index.write(page);
+                for i in offsets {
+                    let bytes = g.get_mut(i).expect("data corruption");
+                    if growing {
+                        let VectorTupleWriter::_0(mut t) = VectorTuple::deserialize_mut(bytes)
+                        else {
+                            unreachable!()
+                        };
+                        *t.deleted() = Bool::TRUE;
+                    } else {
+                        *DocumentTuple::deserialize_mut(bytes).deleted() = Bool::TRUE;
                     }
+                    removed += 1;
                 }
-                current = write.get_opaque().next;
-            } else {
-                current = read.get_opaque().next;
             }
-        }
-    }
-
-    {
-        let first = jump_tuple.ptr_documents();
-        assert!(first != u32::MAX);
-        let mut current = first;
-        while current != u32::MAX {
             check();
-            let read = index.read(current);
-            let flag = 'flag: {
-                for i in 1..=read.len() {
-                    let bytes = read.get(i).expect("data corruption");
-                    let tuple = DocumentTuple::deserialize_ref(bytes);
-                    if !bool::from(tuple.deleted()) && callback(tuple.payload()) {
-                        break 'flag true;
-                    }
-                }
-                false
-            };
-            if flag {
-                drop(read);
-                let mut write = index.write(current);
-                for i in 1..=write.len() {
-                    let bytes = write.get_mut(i).expect("data corruption");
-                    let mut tuple = DocumentTuple::deserialize_mut(bytes);
-                    if !bool::from(*tuple.deleted()) && callback(*tuple.payload()) {
-                        *tuple.deleted() = Bool::TRUE;
-                    }
-                }
-                current = write.get_opaque().next;
-            } else {
-                current = read.get_opaque().next;
-            }
+            page = next;
+            start = 1;
         }
     }
+    removed
 }

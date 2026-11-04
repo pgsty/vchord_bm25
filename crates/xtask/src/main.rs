@@ -25,6 +25,10 @@ struct Cli {
 enum Commands {
     Build(BuildArgs),
     Clippy(ClippyArgs),
+    /// Emit install SQL from an already compiled extension's schema section.
+    Schema {
+        library: PathBuf,
+    },
 }
 
 #[derive(Args)]
@@ -249,6 +253,84 @@ fn generate(obj: impl AsRef<Path>) -> Result<String, Box<dyn Error>> {
     Ok(sql)
 }
 
+// pgrx includes source line numbers and emits comment-only graph nodes in an
+// unstable order. Ignore these annotations when checking the release schema,
+// but preserve quoted SQL verbatim: whitespace and comment markers in function
+// bodies, literals and identifiers can change the API's behavior.
+fn schema_sql(sql: &str) -> String {
+    let mut result = String::new();
+    let mut remaining = sql;
+    while let Some(first) = remaining.chars().next() {
+        let mut skip = first.len_utf8();
+        let mut whitespace = first.is_whitespace();
+        if remaining.starts_with("--") {
+            skip = remaining.find('\n').unwrap_or(remaining.len());
+            whitespace = true;
+        } else if remaining.starts_with("/*") {
+            let mut depth = 1;
+            skip = 2;
+            while depth > 0 && skip < remaining.len() {
+                if remaining[skip..].starts_with("/*") {
+                    depth += 1;
+                    skip += 2;
+                } else if remaining[skip..].starts_with("*/") {
+                    depth -= 1;
+                    skip += 2;
+                } else {
+                    skip += remaining[skip..].chars().next().unwrap().len_utf8();
+                }
+            }
+            // Preserve malformed comments so they cannot mask schema drift.
+            whitespace = depth == 0;
+        } else if matches!(first, '\'' | '"') {
+            let mut prefix = sql[..sql.len() - remaining.len()].chars().rev();
+            let escapes = first == '\''
+                && matches!(prefix.next(), Some('e' | 'E'))
+                && prefix
+                    .next()
+                    .is_none_or(|c| !(c == '_' || c == '$' || c.is_alphanumeric()));
+            while skip < remaining.len() {
+                let next = remaining[skip..].chars().next().unwrap();
+                skip += next.len_utf8();
+                if next == first {
+                    if remaining[skip..].starts_with(first) {
+                        skip += first.len_utf8();
+                    } else {
+                        break;
+                    }
+                } else if next == '\\' && escapes {
+                    // Also retain escaped quotes in E'...' function bodies.
+                    if let Some(escaped) = remaining[skip..].chars().next() {
+                        skip += escaped.len_utf8();
+                    }
+                }
+            }
+        } else if first == '$'
+            && let Some(end) = remaining[1..].find('$')
+        {
+            let tag = &remaining[1..=end];
+            if tag.is_empty()
+                || (tag.starts_with(|c: char| c == '_' || c.is_alphabetic())
+                    && tag.chars().all(|c| c == '_' || c.is_alphanumeric()))
+            {
+                let delimiter = &remaining[..end + 2];
+                skip = remaining[delimiter.len()..]
+                    .find(delimiter)
+                    .map_or(remaining.len(), |end| end + 2 * delimiter.len());
+            }
+        }
+        if whitespace {
+            if !result.ends_with(' ') {
+                result.push(' ');
+            }
+        } else {
+            result.push_str(&remaining[..skip]);
+        }
+        remaining = &remaining[skip..];
+    }
+    result.trim().to_owned()
+}
+
 fn install_by_copying(
     src: impl AsRef<Path>,
     dst: impl AsRef<Path>,
@@ -314,6 +396,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let cli = Cli::parse();
     match cli.command {
+        Commands::Schema { library } => {
+            print!("{}", generate(library)?);
+        }
         Commands::Build(BuildArgs {
             output,
             target,
@@ -355,6 +440,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                 &profile,
                 &target,
             )?;
+            let generated_sql = generate(&obj)?;
+            if vchord_bm25_version != "0.0.0" {
+                let install_sql = format!("./sql/install/vchord_bm25--{vchord_bm25_version}.sql");
+                if schema_sql(&std::fs::read_to_string(&install_sql)?) != schema_sql(&generated_sql)
+                {
+                    return Err(format!(
+                        "{install_sql} does not match the compiled extension. Regenerate the install SQL before packaging."
+                    ).into());
+                }
+            }
             let pkglibdir = format!("{output}/pkglibdir");
             let sharedir = format!("{output}/sharedir");
             let sharedir_extension = format!("{sharedir}/extension");
@@ -393,7 +488,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 )?;
             } else {
                 install_by_writing(
-                    generate(obj)?,
+                    generated_sql,
                     format!("{sharedir_extension}/vchord_bm25--0.0.0.sql"),
                     false,
                 )?;
@@ -427,4 +522,42 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::schema_sql;
+
+    #[test]
+    fn schema_ignores_generated_annotations() {
+        assert_eq!(
+            schema_sql(
+                "/* graph */\n-- src/lib.rs:39\nCREATE  TYPE /* Rust /* nested */ */ bm25query;"
+            ),
+            schema_sql("CREATE TYPE bm25query;"),
+        );
+    }
+
+    #[test]
+    fn schema_preserves_literal_and_function_body_changes() {
+        for quoted in [
+            "'two  spaces /* literal */ -- literal'",
+            "\"two  spaces /* identifier */\"",
+            "$$SELECT 'two  spaces'; -- body comment\n$$",
+            "$body$SELECT 'two  spaces'; /* body comment */$body$",
+            "E'escaped\\'two  spaces'",
+            "'doubled''two  spaces'",
+            r"'backslash\', 'two  spaces'",
+            r"e'escaped\'two  spaces'",
+            r"some'backslash\', 'two  spaces'",
+        ] {
+            let sql = format!("SELECT {quoted};");
+            assert_eq!(schema_sql(&sql), sql);
+            assert_ne!(schema_sql(&sql), schema_sql(&sql.replace("two  ", "two ")));
+        }
+        assert_ne!(
+            schema_sql("SELECT 1; /* unterminated"),
+            schema_sql("SELECT 1;")
+        );
+    }
 }

@@ -210,7 +210,7 @@ jobs:
       - name: Upload Artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: postgresql-${{ matrix.version }}-vchord-bm25_0.0.0_${{ matrix.arch }}-linux-gnu
+          name: postgresql-${{ matrix.version }}-vchord-bm25_1.0.0_${{ matrix.arch }}-linux-gnu
           path: ./build
           compression-level: 9
           retention-days: 14
@@ -224,9 +224,21 @@ jobs:
         run: |
           sqllogictest --db $(whoami) --user $(whoami) './tests/sqllogictest/*.slt'
 
-      - name: Fuzz
+      - name: Concurrent VACUUM
         run: |
           rustup toolchain install nightly
+          ./tests/concurrent_vacuum "user=$(whoami) dbname=$(whoami) host=localhost"
+
+      - name: Storage and recovery acceptance
+        if: matrix.version == '18'
+        run: |
+          sudo apt-get install -y python3-venv
+          python3 -m venv /tmp/bm25-acceptance-venv
+          /tmp/bm25-acceptance-venv/bin/pip install 'psycopg[binary]>=3,<4'
+          /tmp/bm25-acceptance-venv/bin/python tests/acceptance.py --pg-config "$PG_CONFIG" --recovery
+
+      - name: Fuzz
+        run: |
           ./tests/fuzz "user=$(whoami) dbname=$(whoami) host=localhost" $(nproc)
 
       - name: Logging
@@ -300,7 +312,7 @@ jobs:
       - name: Upload Artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: postgresql-${{ matrix.version }}-vchord-bm25_0.0.0_${{ matrix.arch }}-apple-darwin
+          name: postgresql-${{ matrix.version }}-vchord-bm25_1.0.0_${{ matrix.arch }}-apple-darwin
           path: ./build
           compression-level: 9
           retention-days: 14
@@ -404,7 +416,7 @@ jobs:
       - name: Upload Artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: postgresql-${{ matrix.version }}-vchord-bm25_0.0.0_${{ matrix.arch }}-pc-windows-msvc
+          name: postgresql-${{ matrix.version }}-vchord-bm25_1.0.0_${{ matrix.arch }}-pc-windows-msvc
           path: ./build
           compression-level: 9
           retention-days: 14
@@ -525,7 +537,7 @@ jobs:
       - name: Upload Artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: postgresql-${{ matrix.version }}-vchord-bm25_0.0.0_${{ matrix.arch }}-linux-musl
+          name: postgresql-${{ matrix.version }}-vchord-bm25_1.0.0_${{ matrix.arch }}-linux-musl
           path: ./build
           compression-level: 9
           retention-days: 14
@@ -732,7 +744,7 @@ jobs:
       - name: Upload Artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: postgresql-${{ matrix.version }}-vchord-bm25_0.0.0_${{ matrix.clang_triple }}
+          name: postgresql-${{ matrix.version }}-vchord-bm25_1.0.0_${{ matrix.clang_triple }}
           path: ./build
           compression-level: 9
           retention-days: 14

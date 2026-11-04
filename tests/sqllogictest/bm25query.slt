@@ -44,13 +44,23 @@ LIMIT 10;
 1
 7
 2
+3
+5
+6
+10
 
-statement error expected index
+query I
 SELECT id
 FROM documents
 WHERE id % 2 = 0
 ORDER BY to_tsvector('english', passage) <&> to_bm25query(to_tsvector('english', 'PostgreSQL'), 'documents_passage_bm25')
 LIMIT 10;
+----
+8
+4
+2
+6
+10
 
 query I
 SELECT id
@@ -62,13 +72,21 @@ LIMIT 10;
 8
 4
 2
+6
+10
 
-statement error expected index
+query I
 SELECT id
 FROM documents
 WHERE id % 2 = 1
 ORDER BY to_tsvector('english', passage) <&> to_bm25query(to_tsvector('english', 'PostgreSQL'), 'documents_passage_bm25')
 LIMIT 10;
+----
+9
+1
+7
+3
+5
 
 query I
 SELECT id
@@ -80,6 +98,8 @@ LIMIT 10;
 9
 1
 7
+3
+5
 
 statement ok
 DROP TABLE documents;

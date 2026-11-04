@@ -8,15 +8,10 @@
 
 use crate::datatype::memory_tsvector::TsVectorOutput;
 use crate::datatype::tsvector::cast_tsvector_to_query;
-use crate::index::bm25::scanners::SearchOptions;
-use crate::index::fetcher::*;
-use crate::index::scanners::SearchBuilder;
-use always_equal::AlwaysEqual;
 use bm25::vector::Query;
 use index::relation::{Page, RelationId, RelationRead};
 use pgrx::heap_tuple::PgHeapTuple;
 use pgrx::pg_sys::Oid;
-use std::cmp::Reverse;
 use std::num::NonZero;
 
 pub struct DefaultBuilder {
@@ -25,19 +20,14 @@ pub struct DefaultBuilder {
     orderbys: Vec<Option<Query>>,
 }
 
-impl SearchBuilder for DefaultBuilder {
-    type Options = SearchOptions;
-
-    type Opfamily = ();
-
-    type Opaque = bm25::Opaque;
-
-    fn new<R>(index: R, (): ()) -> Self
+impl DefaultBuilder {
+    pub fn new<R>(index: R, (): ()) -> Self
     where
         R: RelationId + RelationRead,
         R::Page: Page<Opaque = bm25::Opaque>,
     {
         let oid = Oid::from_u32(index.id());
+        crate::index::operators::check_index_permissions(oid);
         let seed = bm25::seed::seed(&index);
         Self {
             oid,
@@ -46,7 +36,7 @@ impl SearchBuilder for DefaultBuilder {
         }
     }
 
-    unsafe fn add(&mut self, strategy: u16, value: Option<pgrx::pg_sys::Datum>) {
+    pub unsafe fn add(&mut self, strategy: u16, value: Option<pgrx::pg_sys::Datum>) {
         match strategy {
             1 => {
                 let document = 'block: {
@@ -84,46 +74,19 @@ impl SearchBuilder for DefaultBuilder {
         }
     }
 
-    fn build<'b, R>(
+    pub fn prepare(
         self,
-        index: R,
-        options: SearchOptions,
-        mut fetcher: impl Fetcher + 'b,
-    ) -> Box<dyn Iterator<Item = (f64, [u16; 3])> + 'b>
-    where
-        R: RelationRead,
-        R::Page: Page<Opaque = bm25::Opaque>,
-    {
+        index: &crate::index::storage::PostgresRelation<bm25::Opaque>,
+    ) -> std::rc::Rc<bm25::Prepared> {
         let mut vector = None;
-        for orderby_vector in self.orderbys.into_iter().flatten() {
-            if vector.is_none() {
-                vector = Some(orderby_vector);
-            } else {
+        for orderby in self.orderbys.into_iter().flatten() {
+            if vector.replace(orderby).is_some() {
                 pgrx::error!("vector search with multiple vectors is not supported");
             }
         }
-        let Some(vector) = vector else {
-            return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = (f64, [u16; 3])>>;
-        };
-        let Some(limit) = NonZero::new(options.limit as usize) else {
-            pgrx::error!("number of needed rows is set to 0");
-        };
-        let result = if !options.prefilter {
-            bm25::search(&index, limit, &vector, |_| true)
-        } else {
-            bm25::search(&index, limit, &vector, |pointer| {
-                let Some(mut tuple) = fetcher.fetch(pointer) else {
-                    return false;
-                };
-                if !tuple.filter() {
-                    return false;
-                }
-                true
-            })
-        };
-        let iter = result
-            .into_iter()
-            .map(move |(Reverse(score), AlwaysEqual(pointer))| (score.to_f64(), pointer));
-        Box::new(iter)
+        // A NULL ordering expression is constant for every row; any order is
+        // valid, but it still has to return every indexed row.
+        let query = vector.unwrap_or_else(|| Query::new(Vec::new()));
+        crate::index::query::prepare(index, self.oid, &query)
     }
 }

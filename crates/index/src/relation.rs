@@ -42,6 +42,9 @@ pub trait Page: Sized + 'static {
     #[must_use]
     fn freespace(&self) -> u16;
     fn clear(&mut self, opaque: Self::Opaque);
+    /// An all-zero page: extended but never initialized (e.g. after a crash).
+    #[must_use]
+    fn is_new(&self) -> bool;
 }
 
 pub trait PageGuard {
@@ -71,8 +74,19 @@ pub trait RelationWriteTypes: Relation {
 pub trait RelationWrite: RelationWriteTypes {
     fn write(&self, id: u32) -> Self::WriteGuard<'_>;
     fn alloc(&self, opaque: <Self::Page as Page>::Opaque) -> Self::WriteGuard<'_>;
+    /// Publish a page link and initialize its target in one WAL record.
+    /// Releases `left`, retaining the lock on `right` for further appends.
+    fn commit_pair<'a>(
+        &'a self,
+        left: Self::WriteGuard<'a>,
+        right: Self::WriteGuard<'a>,
+    ) -> Self::WriteGuard<'a>;
     fn free(&self, guard: Self::WriteGuard<'_>);
     fn vacuum(&self);
+    /// Number of pages in the main fork.
+    fn npages(&self) -> u32;
+    /// Report a page as reusable without changing it.
+    fn record_free(&self, id: u32);
 }
 
 pub trait RelationPrefetch: Relation {

@@ -52,7 +52,7 @@ const FUZZ_OPERATIONS: &[Operation] = &[
     Operation::Vacuum,
 ];
 
-fn test(mut clients: Vec<postgres::Client>) {
+fn test(mut clients: Vec<postgres::Client>, iterations: u32) {
     let seed = rand::rng().random_range(0..u64::MAX);
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
     println!("Seed: {}", seed); // for reproducibility
@@ -89,7 +89,7 @@ fn test(mut clients: Vec<postgres::Client>) {
         .unwrap();
 
     if clients.len() == 1 {
-        for _ in 0..FUZZ_ITERATIONS {
+        for _ in 0..iterations {
             {
                 let restuple = clients[0]
                     .query(
@@ -104,7 +104,7 @@ fn test(mut clients: Vec<postgres::Client>) {
             println!("operation = {operation:?}");
             match operation {
                 Operation::Insert => fuzz_insert(&mut clients[0], &mut rng),
-                Operation::Select => fuzz_select(&mut clients[0], &mut rng, true, false),
+                Operation::Select => fuzz_select(&mut clients[0], &mut rng, true),
                 Operation::Delete => fuzz_delete(&mut clients[0], &mut rng),
                 Operation::Vacuum => fuzz_vacuum(&mut clients[0], &mut rng),
             }
@@ -116,25 +116,35 @@ fn test(mut clients: Vec<postgres::Client>) {
             .map(|mut client| {
                 std::thread::spawn(move || {
                     let mut rng = rand::rng();
-                    for _ in 0..FUZZ_ITERATIONS {
+                    for _ in 0..iterations {
                         let operation = FUZZ_OPERATIONS.choose(&mut rng).unwrap();
                         static LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
                         match operation {
-                            Operation::Insert => fuzz_insert(&mut client, &mut rng),
+                            Operation::Insert => {
+                                let _guard = LOCK.read().unwrap();
+                                fuzz_insert(&mut client, &mut rng);
+                            }
                             Operation::Select => {
                                 use std::sync::TryLockError;
-                                let guard = match LOCK.try_read() {
+                                // Physical statistics are frozen per execution,
+                                // not per MVCC transaction. Exact comparisons of
+                                // two statements require pausing all mutations.
+                                // If busy, still check each live concurrent scan.
+                                let guard = match LOCK.try_write() {
                                     Ok(r) => Ok(Some(r)),
                                     Err(TryLockError::Poisoned(e)) => Err(e),
                                     Err(TryLockError::WouldBlock) => Ok(None),
                                 }
                                 .unwrap();
-                                fuzz_select(&mut client, &mut rng, guard.is_some(), false)
+                                fuzz_select(&mut client, &mut rng, guard.is_some())
                             }
-                            Operation::Delete => fuzz_delete(&mut client, &mut rng),
+                            Operation::Delete => {
+                                let _guard = LOCK.read().unwrap();
+                                fuzz_delete(&mut client, &mut rng);
+                            }
                             Operation::Vacuum => {
                                 if rng.random_range(0..n) == 0 {
-                                    let _guard = LOCK.write().unwrap();
+                                    let _guard = LOCK.read().unwrap();
                                     fuzz_vacuum(&mut client, &mut rng);
                                 }
                             }
@@ -154,7 +164,13 @@ fn test(mut clients: Vec<postgres::Client>) {
     clients[0]
         .execute(r#"VACUUM (ANALYZE, INDEX_CLEANUP ON) documents;"#, &[])
         .unwrap();
-    fuzz_select(&mut clients[0], &mut rng, true, true);
+    fuzz_select(&mut clients[0], &mut rng, true);
+    // REINDEX may remove tombstones and change physical corpus statistics.
+    // Check each corpus independently, outside a read-only transaction.
+    clients[0]
+        .execute("REINDEX INDEX documents_embedding_bm25", &[])
+        .unwrap();
+    fuzz_select(&mut clients[0], &mut rng, true);
 
     clients[0].execute(r#"DROP TABLE documents;"#, &[]).unwrap();
 }
@@ -208,7 +224,7 @@ fn fuzz_insert(client: &mut postgres::Client, rng: &mut impl RngExt) {
         .unwrap();
 }
 
-fn fuzz_select(client: &mut postgres::Client, rng: &mut impl RngExt, check: bool, reindex: bool) {
+fn fuzz_select(client: &mut postgres::Client, rng: &mut impl RngExt, check: bool) {
     let mut client = client
         .build_transaction()
         .isolation_level(postgres::IsolationLevel::RepeatableRead)
@@ -248,11 +264,15 @@ fn fuzz_select(client: &mut postgres::Client, rng: &mut impl RngExt, check: bool
         index_result_ranks.push(row.get::<_, f64>(1));
     }
 
-    if reindex {
-        client
-            .execute("REINDEX INDEX documents_embedding_bm25", &[])
-            .unwrap();
-    }
+    assert!(
+        index_result_ranks.windows(2).all(|w| w[0] <= w[1]),
+        "index order disagrees with displayed scores"
+    );
+    assert_eq!(
+        index_results.iter().collect::<std::collections::HashSet<_>>().len(),
+        index_results.len(),
+        "duplicate indexed results"
+    );
 
     client
         .execute("SET LOCAL enable_seqscan = on", &[])
@@ -278,7 +298,13 @@ fn fuzz_select(client: &mut postgres::Client, rng: &mut impl RngExt, check: bool
         seq_result_ranks.push(row.get::<_, f64>(1));
     }
 
-    if check && distance(&index_results, &seq_results) > 10 {
+    assert_eq!(
+        index_results.len(),
+        seq_results.len(),
+        "incomplete indexed results"
+    );
+    // Tied IDs may differ. Exact ordered scores must agree for a stable corpus.
+    if check && index_result_ranks != seq_result_ranks {
         use std::io::Write;
         let mut stdout = std::io::stdout().lock();
         writeln!(stdout, "Query = {query_vector}").unwrap();
@@ -309,37 +335,19 @@ fn fuzz_vacuum(client: &mut postgres::Client, _rng: &mut impl RngExt) {
         .unwrap();
 }
 
-fn distance<T: Eq>(a: &[T], b: &[T]) -> usize {
-    use std::cmp::min;
-
-    let (a, b) = if a.len() <= b.len() { (a, b) } else { (b, a) };
-
-    if a.is_empty() {
-        return b.len();
-    }
-
-    let mut f = (0..a.len() + 1).collect::<Vec<usize>>();
-    let mut last;
-
-    for (j, y) in b.iter().enumerate() {
-        (last, f[0]) = (f[0], j + 1);
-        for (i, x) in a.iter().enumerate() {
-            let value = min(f[i + 1] + 1, min(f[i] + 1, last + (x != y) as usize));
-            (last, f[i + 1]) = (f[i + 1], value);
-        }
-    }
-
-    f[a.len()]
-}
-
 fn main() {
     let params = std::env::args().nth(1).unwrap();
     let num_threads = std::env::args()
         .nth(2)
         .and_then(|x| x.parse::<usize>().ok())
         .unwrap_or(1);
+    let iterations = std::env::args()
+        .nth(3)
+        .map(|x| x.parse::<u32>().expect("iterations must be a positive integer"))
+        .unwrap_or(FUZZ_ITERATIONS);
+    assert!(num_threads > 0 && iterations > 0);
     let clients = (0..num_threads)
         .map(|_| postgres::Client::connect(&params, postgres::tls::NoTls).unwrap())
         .collect::<Vec<_>>();
-    test(clients);
+    test(clients, iterations);
 }

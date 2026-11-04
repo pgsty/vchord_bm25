@@ -14,13 +14,11 @@ use crate::datatype::tsvector::cast_tsvector_to_document;
 use crate::index::bm25::scanners::{DefaultBuilder, SearchOptions};
 use crate::index::fetcher::*;
 use crate::index::gucs;
-use crate::index::scanners::SearchBuilder;
 use crate::index::storage::PostgresRelation;
 use pgrx::datum::Internal;
 use pgrx::pg_sys::Datum;
 use std::cell::LazyCell;
 use std::ffi::CStr;
-use std::ops::DerefMut;
 use std::ptr::NonNull;
 use std::sync::OnceLock;
 
@@ -30,9 +28,26 @@ pub struct Reloption {
     options: i32,
     limit: i32,
     prefilter: bool,
+    maintenance_min_rows: i32,
+    maintenance_scale_factor: f64,
 }
 
 impl Reloption {
+    pub unsafe fn maintenance(this: *const Self, force: bool) -> bm25::Policy {
+        bm25::Policy {
+            min_rows: if this.is_null() {
+                1000
+            } else {
+                unsafe { (*this).maintenance_min_rows as u32 }
+            },
+            scale_factor: if this.is_null() {
+                0.1
+            } else {
+                unsafe { (*this).maintenance_scale_factor }
+            },
+            force,
+        }
+    }
     unsafe fn options<'a>(this: *const Self, default: &'static CStr) -> &'a CStr {
         unsafe {
             if this.is_null() {
@@ -86,6 +101,20 @@ const TABLE: &[pgrx::pg_sys::relopt_parse_elt] = &[
         #[cfg(feature = "pg18")]
         isset_offset: 0,
     },
+    pgrx::pg_sys::relopt_parse_elt {
+        optname: c"maintenance_min_rows".as_ptr(),
+        opttype: pgrx::pg_sys::relopt_type::RELOPT_TYPE_INT,
+        offset: std::mem::offset_of!(Reloption, maintenance_min_rows) as i32,
+        #[cfg(feature = "pg18")]
+        isset_offset: 0,
+    },
+    pgrx::pg_sys::relopt_parse_elt {
+        optname: c"maintenance_scale_factor".as_ptr(),
+        opttype: pgrx::pg_sys::relopt_type::RELOPT_TYPE_REAL,
+        offset: std::mem::offset_of!(Reloption, maintenance_scale_factor) as i32,
+        #[cfg(feature = "pg18")]
+        isset_offset: 0,
+    },
 ];
 
 static RELOPT_KIND: OnceLock<pgrx::pg_sys::relopt_kind::Type> = OnceLock::new();
@@ -106,11 +135,29 @@ pub fn init() {
             pgrx::pg_sys::add_int_reloption(
                 kind as _,
                 c"limit".as_ptr(),
-                c"Search parameter `bm25.limit`".as_ptr(),
-                0,
+                c"Initial BM25 scan batch size (zero selects 100)".as_ptr(),
+                100,
                 0,
                 65535,
                 pgrx::pg_sys::AccessExclusiveLock as pgrx::pg_sys::LOCKMODE,
+            );
+            pgrx::pg_sys::add_int_reloption(
+                kind as _,
+                c"maintenance_min_rows".as_ptr(),
+                c"Minimum growing records before VACUUM merges segments".as_ptr(),
+                1000,
+                0,
+                i32::MAX,
+                pgrx::pg_sys::ShareUpdateExclusiveLock as _,
+            );
+            pgrx::pg_sys::add_real_reloption(
+                kind as _,
+                c"maintenance_scale_factor".as_ptr(),
+                c"Growing/sealed or deleted/total fraction that triggers compaction".as_ptr(),
+                0.1,
+                0.0,
+                1.0,
+                pgrx::pg_sys::ShareUpdateExclusiveLock as _,
             );
             pgrx::pg_sys::add_bool_reloption(
                 kind as _,
@@ -142,7 +189,7 @@ const AM_HANDLER: pgrx::pg_sys::IndexAmRoutine = const {
     am_routine.amsupport = 0;
     am_routine.amcanorderbyop = true;
 
-    #[cfg(any(feature = "pg17", feature = "pg18"))]
+    #[cfg(any(feature = "pg17", feature = "pg18", feature = "pg19"))]
     {
         am_routine.amcanbuildparallel = false;
     }
@@ -165,6 +212,9 @@ const AM_HANDLER: pgrx::pg_sys::IndexAmRoutine = const {
     am_routine.ambuildempty = Some(am_build::ambuildempty);
     am_routine.aminsert = Some(aminsert);
     am_routine.ambulkdelete = Some(ambulkdelete);
+    am_routine.amparallelvacuumoptions = (pgrx::pg_sys::VACUUM_OPTION_PARALLEL_BULKDEL
+        | pgrx::pg_sys::VACUUM_OPTION_PARALLEL_CLEANUP)
+        as _;
     am_routine.amvacuumcleanup = Some(am_vacuumcleanup::amvacuumcleanup);
 
     am_routine.ambeginscan = Some(ambeginscan);
@@ -203,7 +253,7 @@ pub unsafe extern "C-unwind" fn amoptions(
 pub unsafe extern "C-unwind" fn amcostestimate(
     root: *mut pgrx::pg_sys::PlannerInfo,
     path: *mut pgrx::pg_sys::IndexPath,
-    _loop_count: f64,
+    loop_count: f64,
     index_startup_cost: *mut pgrx::pg_sys::Cost,
     index_total_cost: *mut pgrx::pg_sys::Cost,
     index_selectivity: *mut pgrx::pg_sys::Selectivity,
@@ -211,43 +261,105 @@ pub unsafe extern "C-unwind" fn amcostestimate(
     index_pages: *mut f64,
 ) {
     unsafe {
-        use pgrx::pg_sys::disable_cost;
         let index_opt_info = (*path).indexinfo;
+        // A runtime index OID cannot select a physical index path safely.
+        // Generic plans fall back to scalar sorting unless the target index
+        // is known (including a RowExpr with a parameterized query vector).
+        let mut target_matches = false;
+        // A second ORDER BY key cannot be served by this scan.
+        if !(*path).indexorderbys.is_null() && (*(*path).indexorderbys).length == 1 {
+            use pgrx::FromDatum;
+            let expr =
+                pgrx::pg_sys::list_nth((*path).indexorderbys, 0).cast::<pgrx::pg_sys::OpExpr>();
+            if (*expr).xpr.type_ == pgrx::pg_sys::NodeTag::T_OpExpr && (*(*expr).args).length == 2 {
+                let rhs = pgrx::pg_sys::list_nth((*expr).args, 1).cast::<pgrx::pg_sys::Node>();
+                match (*rhs).type_ {
+                    pgrx::pg_sys::NodeTag::T_Const => {
+                        let rhs = &*rhs.cast::<pgrx::pg_sys::Const>();
+                        if rhs.constisnull {
+                            target_matches = true;
+                        } else {
+                            let tuple = pgrx::heap_tuple::PgHeapTuple::<'_, pgrx::AllocatedByRust>::from_datum(rhs.constvalue, false).unwrap();
+                            let expected: Option<pgrx::pg_sys::Oid> = tuple
+                                .get_by_index(std::num::NonZero::new(2).unwrap())
+                                .unwrap();
+                            target_matches = expected == Some((*index_opt_info).indexoid);
+                        }
+                    }
+                    pgrx::pg_sys::NodeTag::T_RowExpr => {
+                        let row = &*rhs.cast::<pgrx::pg_sys::RowExpr>();
+                        if !row.args.is_null() && (*row.args).length == 2 {
+                            let target =
+                                pgrx::pg_sys::list_nth(row.args, 1).cast::<pgrx::pg_sys::Const>();
+                            if (*target).xpr.type_ == pgrx::pg_sys::NodeTag::T_Const
+                                && !(*target).constisnull
+                            {
+                                let expected =
+                                    pgrx::pg_sys::Oid::from_datum((*target).constvalue, false);
+                                target_matches = expected == Some((*index_opt_info).indexoid);
+                            }
+                        }
+                    }
+                    pgrx::pg_sys::NodeTag::T_FuncExpr => {
+                        // to_bm25query() is STRICT around ROW(), so PostgreSQL
+                        // does not inline it; accept a constant target index.
+                        let func = &*rhs.cast::<pgrx::pg_sys::FuncExpr>();
+                        let name = pgrx::pg_sys::get_func_name(func.funcid);
+                        if !name.is_null()
+                            && CStr::from_ptr(name) == c"to_bm25query"
+                            && !func.args.is_null()
+                            && (*func.args).length == 2
+                        {
+                            let target =
+                                pgrx::pg_sys::list_nth(func.args, 1).cast::<pgrx::pg_sys::Const>();
+                            if (*target).xpr.type_ == pgrx::pg_sys::NodeTag::T_Const
+                                && !(*target).constisnull
+                            {
+                                let expected =
+                                    pgrx::pg_sys::Oid::from_datum((*target).constvalue, false);
+                                target_matches = expected == Some((*index_opt_info).indexoid);
+                            }
+                        }
+                    }
+                    _ => (),
+                }
+            }
+        }
         // do not use index, if there are no orderbys or clauses
-        if ((*path).indexorderbys.is_null() && (*path).indexclauses.is_null())
-            || !gucs::bm25_enable_scan()
-        {
-            *index_startup_cost = disable_cost;
-            *index_total_cost = disable_cost;
+        if (*path).indexorderbys.is_null() || !target_matches || !gucs::bm25_enable_scan() {
+            #[cfg(any(feature = "pg18", feature = "pg19"))]
+            {
+                (*path).path.disabled_nodes = 2;
+            }
+            *index_startup_cost = f64::INFINITY;
+            *index_total_cost = f64::INFINITY;
             *index_selectivity = 0.0;
             *index_correlation = 0.0;
             *index_pages = 1.0;
             return;
         }
-        let selectivity = {
-            use pgrx::pg_sys::{
-                JoinType, add_predicate_to_index_quals, clauselist_selectivity,
-                get_quals_from_indexclauses,
-            };
-            let index_quals = get_quals_from_indexclauses((*path).indexclauses);
-            let selectivity_quals = add_predicate_to_index_quals(index_opt_info, index_quals);
-            clauselist_selectivity(
-                root,
-                selectivity_quals,
-                (*(*index_opt_info).rel).relid as _,
-                JoinType::JOIN_INNER,
-                std::ptr::null_mut(),
-            )
-        };
-        // index exists
-        if !(*index_opt_info).hypothetical {
-            // todo(usamoi)
-        }
-        *index_startup_cost = 0.0;
-        *index_total_cost = 0.0;
-        *index_selectivity = selectivity;
+        // Keep PostgreSQL's CPU, tablespace and repeated-scan cache estimates,
+        // but posting chains are sequential I/O. Until term-level planner
+        // statistics exist, charge a conservative full-index sequential read.
+        // This is a heuristic, not a measured WAND/posting selectivity model.
+        let mut costs = pgrx::pg_sys::GenericCosts::default();
+        pgrx::pg_sys::genericcostestimate(root, path, loop_count, &mut costs);
+        let mut random = 0.0;
+        let mut sequential = 0.0;
+        pgrx::pg_sys::get_tablespace_page_costs(
+            (*index_opt_info).reltablespace,
+            &mut random,
+            &mut sequential,
+        );
+        let work = (costs.indexTotalCost - costs.numIndexPages * (random - sequential))
+            .max(costs.indexStartupCost);
+        *index_startup_cost = work;
+        *index_total_cost = work;
+        // A scan now continues through all candidates; its batch size must
+        // never pretend to reduce SQL selectivity or the logical row count.
+        *index_selectivity = costs.indexSelectivity;
         *index_correlation = 0.0;
-        *index_pages = 1.0;
+        *index_pages = costs.numIndexPages;
     }
 }
 
@@ -277,9 +389,11 @@ pub unsafe extern "C-unwind" fn aminsert(
         let vector = unsafe { TsVectorInput::from_datum(datum, false).unwrap() };
         Some(cast_tsvector_to_document(&seed, vector.as_borrowed()))
     };
-    if let Some(document) = document {
-        bm25::insert(&index, &document, ctid_to_key(ctid));
-    }
+    bm25::insert(
+        &index,
+        &document.unwrap_or_else(bm25::vector::Document::null),
+        ctid_to_key(ctid),
+    );
     false
 }
 
@@ -301,7 +415,7 @@ pub unsafe extern "C-unwind" fn ambulkdelete(
     let check = || unsafe {
         #[cfg(any(feature = "pg14", feature = "pg15", feature = "pg16", feature = "pg17"))]
         pgrx::pg_sys::vacuum_delay_point();
-        #[cfg(feature = "pg18")]
+        #[cfg(any(feature = "pg18", feature = "pg19"))]
         pgrx::pg_sys::vacuum_delay_point(false);
     };
     let callback = callback.expect("null function pointer");
@@ -312,7 +426,10 @@ pub unsafe extern "C-unwind" fn ambulkdelete(
             pg_guard_ffi_boundary(|| callback(&mut ctid, callback_state))
         }
     };
-    bm25::bulkdelete(&index, check, callback);
+    let removed = bm25::bulkdelete(&index, check, callback);
+    unsafe {
+        (*stats).tuples_removed += removed as f64;
+    }
     stats
 }
 
@@ -327,7 +444,13 @@ pub unsafe extern "C-unwind" fn ambeginscan(
     let scan = unsafe { pgrx::pg_sys::RelationGetIndexScan(index_relation, n_keys, n_orderbys) };
     let scanner: Scanner = Scanner {
         hack: None,
-        scanning: LazyCell::new(Box::new(|| Box::new(std::iter::empty()))),
+        pending: None,
+        scanning: Vec::new().into_iter(),
+        prepared: None,
+        after: None,
+        batch: 0,
+        exhausted: false,
+        prefilter: false,
     };
     unsafe {
         (*scan).opaque = CurrentMemoryContext.leak_and_drop_on_delete(scanner).cast();
@@ -356,29 +479,17 @@ pub unsafe extern "C-unwind" fn amrescan(
             );
         }
         let scanner = &mut *(*scan).opaque.cast::<Scanner>();
-        scanner.scanning = LazyCell::new(Box::new(|| Box::new(std::iter::empty())));
+        scanner.pending = None;
+        scanner.prepared = None;
+        scanner.after = None;
+        scanner.exhausted = false;
+        scanner.scanning = Vec::new().into_iter();
         let index = PostgresRelation::new((*scan).indexRelation);
         let options = SearchOptions {
             limit: gucs::bm25_limit((*scan).indexRelation),
             prefilter: gucs::bm25_prefilter((*scan).indexRelation),
         };
-        let fetcher = {
-            let hack = scanner.hack;
-            LazyCell::new(move || {
-                HeapFetcher::new(
-                    (*scan).indexRelation,
-                    (*scan).heapRelation,
-                    (*scan).xs_snapshot,
-                    (*scan).xs_heapfetch,
-                    if let Some(hack) = hack {
-                        hack.as_ptr()
-                    } else {
-                        std::ptr::null_mut()
-                    },
-                )
-            })
-        };
-        scanner.scanning = {
+        scanner.pending = {
             let mut builder = DefaultBuilder::new(index, ());
             for i in 0..(*scan).numberOfOrderBys {
                 let data = (*scan).orderByData.add(i as usize);
@@ -392,7 +503,7 @@ pub unsafe extern "C-unwind" fn amrescan(
                 let is_null = ((*data).sk_flags & pgrx::pg_sys::SK_ISNULL as i32) != 0;
                 builder.add((*data).sk_strategy, (!is_null).then_some(value));
             }
-            LazyCell::new(Box::new(move || builder.build(index, options, fetcher)))
+            Some((builder, options))
         };
     }
 }
@@ -414,27 +525,96 @@ pub unsafe extern "C-unwind" fn amgettuple(
         pgrx::error!("scanning with a non-MVCC-compliant snapshot is not supported");
     }
     let scanner = unsafe { (*scan).opaque.cast::<Scanner>().as_mut().unwrap_unchecked() };
-    if let Some((_, key)) = scanner.scanning.deref_mut().next() {
-        unsafe {
-            (*scan).xs_heaptid = key_to_ctid(key);
-            (*scan).xs_recheck = false;
-            (*scan).xs_recheckorderby = false;
+    let index = unsafe { PostgresRelation::new((*scan).indexRelation) };
+    if let Some((builder, options)) = scanner.pending.take() {
+        scanner.prepared = Some(builder.prepare(&index));
+        scanner.batch = if options.limit == 0 {
+            100
+        } else {
+            options.limit as usize
+        };
+        scanner.prefilter = options.prefilter;
+        if let Some(hack) = scanner.hack {
+            // Volatile predicates must run only in PostgreSQL's executor.
+            if unsafe {
+                pgrx::pg_sys::contain_volatile_functions((*(*hack.as_ptr()).ss.ps.plan).qual.cast())
+            } {
+                scanner.prefilter = false;
+            }
         }
-        true
-    } else {
-        false
+    }
+    loop {
+        if let Some((score, key)) = scanner.scanning.next() {
+            scanner.after = Some((score, key));
+            unsafe {
+                (*scan).xs_heaptid = key_to_ctid(key);
+                (*scan).xs_recheck = false;
+                (*scan).xs_recheckorderby = false;
+            }
+            return true;
+        }
+        if scanner.exhausted {
+            return false;
+        }
+        let prepared = scanner.prepared.as_ref().expect("uninitialized scan");
+        let hack = scanner.hack.map_or(std::ptr::null_mut(), NonNull::as_ptr);
+        // PostgreSQL resources stay on the stack, including on ERROR cleanup.
+        let mut fetcher = LazyCell::new(|| unsafe {
+            HeapFetcher::new(
+                (*scan).indexRelation,
+                (*scan).heapRelation,
+                (*scan).xs_snapshot,
+                (*scan).xs_heapfetch,
+                hack,
+            )
+        });
+        let mut results = bm25::search(
+            &index,
+            std::num::NonZero::new(scanner.batch + 1).unwrap(),
+            prepared,
+            scanner.after,
+            |pointer| {
+                if !scanner.prefilter {
+                    return true;
+                }
+                fetcher
+                    .fetch(pointer)
+                    .is_some_and(|mut tuple| tuple.filter())
+            },
+            || {
+                pgrx::pg_sys::check_for_interrupts!();
+            },
+            crate::index::storage::reader(),
+        );
+        drop(fetcher);
+        scanner.exhausted = results.len() <= scanner.batch;
+        results.truncate(scanner.batch);
+        scanner.scanning = results
+            .into_iter()
+            .map(|(score, key)| (score.0.to_f64(), key))
+            .collect::<Vec<_>>()
+            .into_iter();
+        scanner.batch = scanner.batch.saturating_mul(2).min(u32::MAX as usize);
     }
 }
 
 #[pgrx::pg_guard]
 pub unsafe extern "C-unwind" fn amendscan(scan: pgrx::pg_sys::IndexScanDesc) {
     let scanner = unsafe { &mut *(*scan).opaque.cast::<Scanner>() };
-    scanner.scanning = LazyCell::new(Box::new(|| Box::new(std::iter::empty())));
+    scanner.pending = None;
+    scanner.prepared = None;
+    scanner.scanning = Vec::new().into_iter();
 }
 
-type Iter = Box<dyn Iterator<Item = (f64, [u16; 3])>>;
-
+// Only Rust-owned query data and materialized results may live in this state.
+// Its destructor can run after PostgreSQL has already released all resources.
 pub struct Scanner {
     pub hack: Option<NonNull<pgrx::pg_sys::IndexScanState>>,
-    scanning: LazyCell<Iter, Box<dyn FnOnce() -> Iter>>,
+    pending: Option<(DefaultBuilder, SearchOptions)>,
+    prepared: Option<std::rc::Rc<bm25::Prepared>>,
+    after: Option<(f64, [u16; 3])>,
+    batch: usize,
+    exhausted: bool,
+    prefilter: bool,
+    scanning: std::vec::IntoIter<(f64, [u16; 3])>,
 }

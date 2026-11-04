@@ -184,13 +184,17 @@ pub fn write(
     document: &Document,
     payload: [u16; 3],
 ) {
-    let document_id = records_writer.write(Record(document.length(), payload));
+    let document_id = records_writer.write(Record(
+        document.length(),
+        payload,
+        u16::from(document.is_null()),
+    ));
     for &Element { key, value } in document.iter() {
         mappings_writer.write(Mapping(key, document_id, value));
     }
 }
 
-pub fn locally_merge(dir: impl AsRef<Path>, code: u32) {
+pub fn locally_merge(dir: impl AsRef<Path>, code: u32, check: &impl Fn()) {
     let dir = dir.as_ref();
     let (mut start, mut end) = (0_u32, 'end: {
         for number in 0..=u32::MAX {
@@ -215,7 +219,10 @@ pub fn locally_merge(dir: impl AsRef<Path>, code: u32) {
             handle_io_error(File::create_new(dir.join(filename)))
         };
         let mut writer = BufWriter::with_capacity(64 * 1024, file);
-        for mapping in reader {
+        for (i, mapping) in reader.enumerate() {
+            if i % 4096 == 0 {
+                check();
+            }
             handle_io_error(writer.write_all(mapping.as_bytes()));
         }
         handle_io_error(writer.into_inner().map_err(|e| e.into_error()));

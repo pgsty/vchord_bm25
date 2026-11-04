@@ -11,11 +11,12 @@ mod address_tokens;
 mod bm25;
 mod build;
 mod bulkdelete;
+mod checked;
 mod compression;
-mod evaluate;
 mod flush;
 mod insert;
 mod maintain;
+mod prepared;
 mod search;
 mod tape;
 mod tuples;
@@ -37,6 +38,9 @@ const _: () = assert!(WIDTH <= 32);
 pub struct Opaque {
     pub next: u32,
     pub flags: u32,
+    // The segment generation that allocated this page. Readers compare it
+    // with the generation they copied from the jump tuple to detect reuse.
+    pub generation: u64,
 }
 
 #[allow(unsafe_code)]
@@ -53,7 +57,8 @@ unsafe impl index::relation::Opaque for Opaque {
 
 pub use build::build;
 pub use bulkdelete::bulkdelete;
-pub use evaluate::evaluate;
+pub use checked::Reader;
 pub use insert::insert;
-pub use maintain::maintain;
+pub use maintain::{Maintained, Policy, maintain};
+pub use prepared::Prepared;
 pub use search::search;

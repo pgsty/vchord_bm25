@@ -1,0 +1,224 @@
+# Rows inserted after index creation must be searchable before VACUUM. Growing
+# rows use the same combined BM25 statistics as sealed rows.
+statement ok
+CREATE TABLE growing_documents (id integer PRIMARY KEY, vector tsvector);
+
+statement ok
+INSERT INTO growing_documents VALUES
+    (1, to_tsvector('simple', 'alpha alpha')),
+    (2, to_tsvector('simple', 'alpha'));
+
+statement ok
+CREATE INDEX growing_documents_bm25
+ON growing_documents USING bm25 (vector bm25_ops)
+WITH (limit = 100, maintenance_min_rows = 1);
+
+statement ok
+INSERT INTO growing_documents VALUES
+    (3, to_tsvector('simple', 'beta beta beta')),
+    (4, to_tsvector('simple', 'alpha beta')),
+    (5, to_tsvector('simple', 'gamma'));
+
+statement ok
+SET enable_seqscan = off;
+
+statement ok
+SET enable_sort = off;
+
+statement ok
+SET "bm25.limit" = 100;
+
+query I
+SELECT id
+FROM growing_documents
+WHERE vector @@ to_tsquery('simple', 'beta')
+ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'beta'), 'growing_documents_bm25'), id
+LIMIT 100;
+----
+3
+4
+
+query I
+SELECT id
+FROM growing_documents
+WHERE vector @@ to_tsquery('simple', 'gamma')
+ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'gamma'), 'growing_documents_bm25'), id
+LIMIT 100;
+----
+5
+
+query T
+SELECT array_agg(id ORDER BY id)
+FROM (
+    SELECT id
+    FROM growing_documents
+    WHERE vector @@ to_tsquery('simple', 'alpha')
+    ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'alpha'), 'growing_documents_bm25'), id
+    LIMIT 100
+) AS results;
+----
+{1,2,4}
+
+# Scalar evaluation and index ordering must agree while the growing segment exists.
+statement ok
+SET enable_sort = on;
+
+statement ok
+SET bm25.enable_scan = off;
+
+statement ok
+CREATE TEMP TABLE growing_scalar AS
+SELECT array_agg(id ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'alpha beta'), 'growing_documents_bm25'), id) AS ids
+FROM growing_documents
+WHERE vector @@ to_tsquery('simple', 'alpha | beta');
+
+statement ok
+SET bm25.enable_scan = on;
+
+statement ok
+SET enable_sort = off;
+
+statement ok
+CREATE TEMP TABLE growing_index AS
+SELECT array_agg(id ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'alpha beta'), 'growing_documents_bm25'), id) AS ids
+FROM growing_documents
+WHERE vector @@ to_tsquery('simple', 'alpha | beta');
+
+query I
+SELECT (growing_scalar.ids = growing_index.ids)::int
+FROM growing_scalar CROSS JOIN growing_index;
+----
+1
+
+# Growing statistics must use the original term frequencies. The fieldnorm
+# table quantizes long document lengths, but VACUUM must not change scores.
+statement ok
+INSERT INTO growing_documents VALUES
+    (8, to_tsvector('simple', repeat('alpha ', 6) || repeat('filler ', 37)));
+
+statement ok
+CREATE TEMP TABLE growing_scores AS
+SELECT id,
+    vector <&> to_bm25query(to_tsvector('simple', 'alpha'), 'growing_documents_bm25') AS score
+FROM growing_documents
+WHERE vector @@ to_tsquery('simple', 'alpha');
+
+statement ok
+VACUUM (ANALYZE, INDEX_CLEANUP ON) growing_documents;
+
+query I
+SELECT count(*)
+FROM growing_scores s
+JOIN growing_documents d USING (id)
+WHERE s.score <> d.vector <&> to_bm25query(to_tsvector('simple', 'alpha'), 'growing_documents_bm25');
+----
+0
+
+# Updates and deletes in the growing tape must not leave stale searchable rows.
+statement ok
+INSERT INTO growing_documents VALUES (6, to_tsvector('simple', 'delta delta'));
+
+statement ok
+UPDATE growing_documents
+SET vector = to_tsvector('simple', 'epsilon epsilon epsilon')
+WHERE id = 6;
+
+statement ok
+INSERT INTO growing_documents VALUES (7, to_tsvector('simple', 'delta'));
+
+statement ok
+DELETE FROM growing_documents WHERE id = 7;
+
+query I
+SELECT count(*)
+FROM (
+    SELECT id
+    FROM growing_documents
+    WHERE vector @@ to_tsquery('simple', 'delta')
+    ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'delta'), 'growing_documents_bm25')
+    LIMIT 100
+) AS results;
+----
+0
+
+query I
+SELECT count(*)
+FROM (
+    SELECT id
+    FROM growing_documents
+    WHERE vector @@ to_tsquery('simple', 'epsilon')
+    ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'epsilon'), 'growing_documents_bm25')
+    LIMIT 100
+) AS results;
+----
+1
+
+# VACUUM seals the growing rows without changing visible results.
+statement ok
+VACUUM (ANALYZE, INDEX_CLEANUP ON) growing_documents;
+
+query I
+SELECT id
+FROM growing_documents
+WHERE vector @@ to_tsquery('simple', 'beta')
+ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'beta'), 'growing_documents_bm25'), id
+LIMIT 100;
+----
+3
+4
+
+query I
+SELECT id
+FROM growing_documents
+WHERE vector @@ to_tsquery('simple', 'gamma')
+ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'gamma'), 'growing_documents_bm25'), id
+LIMIT 100;
+----
+5
+
+query I
+SELECT count(*)
+FROM (
+    SELECT id
+    FROM growing_documents
+    WHERE vector @@ to_tsquery('simple', 'delta')
+    ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'delta'), 'growing_documents_bm25')
+    LIMIT 100
+) AS results;
+----
+0
+
+query I
+SELECT count(*)
+FROM (
+    SELECT id
+    FROM growing_documents
+    WHERE vector @@ to_tsquery('simple', 'epsilon')
+    ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'epsilon'), 'growing_documents_bm25')
+    LIMIT 100
+) AS results;
+----
+1
+
+query I
+SELECT count(*)
+FROM (
+    SELECT id
+    FROM growing_documents
+    ORDER BY vector <&> to_bm25query(to_tsvector('simple', ''), 'growing_documents_bm25')
+    LIMIT 100
+) AS results;
+----
+7
+
+statement ok
+DROP TABLE growing_scalar, growing_index, growing_scores, growing_documents;
+
+statement ok
+RESET bm25.enable_scan;
+
+statement ok
+RESET enable_sort;
+
+statement ok
+RESET enable_seqscan;

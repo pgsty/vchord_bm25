@@ -14,7 +14,7 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 pub const ALIGN: usize = 8;
 pub type Tag = u64;
 const MAGIC: Tag = Tag::from_ne_bytes(*b"vchordbm");
-const VERSION: u64 = 1;
+const VERSION: u64 = 4;
 
 #[inline(always)]
 fn tag(source: &[u8]) -> Tag {
@@ -45,15 +45,14 @@ struct MetaTupleHeader {
     version: u64,
     k1: f64,
     b: f64,
-    ptr_lock: u32,
     ptr_jump: u32,
+    _padding: [Padding; 4],
     seed: [u8; 32],
 }
 
 pub struct MetaTuple {
     pub k1: f64,
     pub b: f64,
-    pub ptr_lock: u32,
     pub ptr_jump: u32,
     pub seed: [u8; 32],
 }
@@ -66,7 +65,6 @@ impl Tuple for MetaTuple {
             MetaTuple {
                 k1,
                 b,
-                ptr_lock,
                 ptr_jump,
                 seed,
             } => {
@@ -77,7 +75,7 @@ impl Tuple for MetaTuple {
                         k1: *k1,
                         b: *b,
                         ptr_jump: *ptr_jump,
-                        ptr_lock: *ptr_lock,
+                        _padding: Default::default(),
                         seed: *seed,
                     }
                     .as_bytes(),
@@ -121,9 +119,6 @@ impl<'a> MetaTupleReader<'a> {
     pub fn b(self) -> f64 {
         self.header.b
     }
-    pub fn ptr_lock(self) -> u32 {
-        self.header.ptr_lock
-    }
     pub fn ptr_jump(self) -> u32 {
         self.header.ptr_jump
     }
@@ -151,6 +146,21 @@ struct JumpTupleHeader {
     ptr_summaries: u32,
     ptr_blocks: u32,
     _padding_0: [Padding; 4],
+    generation: u64,
+    safexid: u64,
+    graveyard_vectors: u32,
+    graveyard_vectors_end: u32,
+    graveyard_documents: u32,
+    graveyard_tokens: u32,
+    graveyard_summaries: u32,
+    graveyard_blocks: u32,
+    graveyard_free_documents: u32,
+    graveyard_free_tokens: u32,
+    ptr_vectors_offset: u16,
+    _padding_1: [Padding; 2],
+    tail_hint: u32,
+    number_of_nulls: u32,
+    _padding_2: [Padding; 4],
 }
 
 #[derive(Debug, Clone)]
@@ -170,6 +180,19 @@ pub struct JumpTuple {
     pub ptr_tokens: u32,
     pub ptr_summaries: u32,
     pub ptr_blocks: u32,
+    pub generation: u64,
+    pub safexid: u64,
+    pub graveyard_vectors: u32,
+    pub graveyard_vectors_end: u32,
+    pub graveyard_documents: u32,
+    pub graveyard_tokens: u32,
+    pub graveyard_summaries: u32,
+    pub graveyard_blocks: u32,
+    pub graveyard_free_documents: u32,
+    pub graveyard_free_tokens: u32,
+    pub ptr_vectors_offset: u16,
+    pub tail_hint: u32,
+    pub number_of_nulls: u32,
 }
 
 impl Tuple for JumpTuple {
@@ -191,6 +214,21 @@ impl Tuple for JumpTuple {
             ptr_summaries: self.ptr_summaries,
             ptr_blocks: self.ptr_blocks,
             _padding_0: Default::default(),
+            generation: self.generation,
+            safexid: self.safexid,
+            graveyard_vectors: self.graveyard_vectors,
+            graveyard_vectors_end: self.graveyard_vectors_end,
+            graveyard_documents: self.graveyard_documents,
+            graveyard_tokens: self.graveyard_tokens,
+            graveyard_summaries: self.graveyard_summaries,
+            graveyard_blocks: self.graveyard_blocks,
+            graveyard_free_documents: self.graveyard_free_documents,
+            graveyard_free_tokens: self.graveyard_free_tokens,
+            ptr_vectors_offset: self.ptr_vectors_offset,
+            tail_hint: self.tail_hint,
+            number_of_nulls: self.number_of_nulls,
+            _padding_2: Default::default(),
+            _padding_1: Default::default(),
         }
         .as_bytes()
         .to_vec()
@@ -262,6 +300,51 @@ impl<'a> JumpTupleReader<'a> {
     pub fn ptr_blocks(self) -> u32 {
         self.header.ptr_blocks
     }
+    pub fn free_documents(self) -> u32 {
+        self.header.free_documents
+    }
+    pub fn free_tokens(self) -> u32 {
+        self.header.free_tokens
+    }
+    pub fn generation(self) -> u64 {
+        self.header.generation
+    }
+    pub fn safexid(self) -> u64 {
+        self.header.safexid
+    }
+    pub fn graveyard_vectors(self) -> u32 {
+        self.header.graveyard_vectors
+    }
+    pub fn graveyard_vectors_end(self) -> u32 {
+        self.header.graveyard_vectors_end
+    }
+    pub fn graveyard_documents(self) -> u32 {
+        self.header.graveyard_documents
+    }
+    pub fn graveyard_tokens(self) -> u32 {
+        self.header.graveyard_tokens
+    }
+    pub fn graveyard_summaries(self) -> u32 {
+        self.header.graveyard_summaries
+    }
+    pub fn graveyard_blocks(self) -> u32 {
+        self.header.graveyard_blocks
+    }
+    pub fn graveyard_free_documents(self) -> u32 {
+        self.header.graveyard_free_documents
+    }
+    pub fn graveyard_free_tokens(self) -> u32 {
+        self.header.graveyard_free_tokens
+    }
+    pub fn tail_hint(self) -> u32 {
+        self.header.tail_hint
+    }
+    pub fn number_of_nulls(self) -> u32 {
+        self.header.number_of_nulls
+    }
+    pub fn ptr_vectors_offset(self) -> u16 {
+        self.header.ptr_vectors_offset
+    }
 }
 
 #[derive(Debug)]
@@ -315,6 +398,45 @@ impl<'a> JumpTupleWriter<'a> {
     pub fn ptr_blocks(&mut self) -> &mut u32 {
         &mut self.header.ptr_blocks
     }
+    pub fn generation(&mut self) -> &mut u64 {
+        &mut self.header.generation
+    }
+    pub fn safexid(&mut self) -> &mut u64 {
+        &mut self.header.safexid
+    }
+    pub fn graveyard_vectors(&mut self) -> &mut u32 {
+        &mut self.header.graveyard_vectors
+    }
+    pub fn graveyard_vectors_end(&mut self) -> &mut u32 {
+        &mut self.header.graveyard_vectors_end
+    }
+    pub fn graveyard_documents(&mut self) -> &mut u32 {
+        &mut self.header.graveyard_documents
+    }
+    pub fn graveyard_tokens(&mut self) -> &mut u32 {
+        &mut self.header.graveyard_tokens
+    }
+    pub fn graveyard_summaries(&mut self) -> &mut u32 {
+        &mut self.header.graveyard_summaries
+    }
+    pub fn graveyard_blocks(&mut self) -> &mut u32 {
+        &mut self.header.graveyard_blocks
+    }
+    pub fn graveyard_free_documents(&mut self) -> &mut u32 {
+        &mut self.header.graveyard_free_documents
+    }
+    pub fn graveyard_free_tokens(&mut self) -> &mut u32 {
+        &mut self.header.graveyard_free_tokens
+    }
+    pub fn tail_hint(&mut self) -> &mut u32 {
+        &mut self.header.tail_hint
+    }
+    pub fn number_of_nulls(&mut self) -> &mut u32 {
+        &mut self.header.number_of_nulls
+    }
+    pub fn ptr_vectors_offset(&mut self) -> &mut u16 {
+        &mut self.header.ptr_vectors_offset
+    }
 }
 
 #[repr(C, align(8))]
@@ -340,7 +462,8 @@ struct VectorTupleHeader1 {
 #[derive(Debug, Clone, FromBytes, IntoBytes, Immutable, KnownLayout)]
 struct VectorTupleHeader2 {
     fieldnorm: u8,
-    _padding_0: [Padding; 7],
+    is_null: Bool,
+    _padding_0: [Padding; 6],
 }
 
 pub enum VectorTuple {
@@ -354,6 +477,7 @@ pub enum VectorTuple {
     },
     _2 {
         fieldnorm: u8,
+        is_null: Bool,
     },
 }
 
@@ -408,11 +532,12 @@ impl Tuple for VectorTuple {
                     .as_bytes(),
                 );
             }
-            VectorTuple::_2 { fieldnorm } => {
+            VectorTuple::_2 { fieldnorm, is_null } => {
                 buffer.extend((2 as Tag).to_ne_bytes());
                 buffer.extend(
                     VectorTupleHeader2 {
                         fieldnorm: *fieldnorm,
+                        is_null: *is_null,
                         _padding_0: Default::default(),
                     }
                     .as_bytes(),
@@ -546,6 +671,9 @@ pub struct VectorTupleReader2<'a> {
 }
 
 impl VectorTupleReader2<'_> {
+    pub fn is_null(self) -> bool {
+        self.header.is_null.into()
+    }
     pub fn fieldnorm(self) -> u8 {
         self.header.fieldnorm
     }
@@ -567,9 +695,6 @@ pub struct VectorTupleWriter0<'a> {
 impl<'a> VectorTupleWriter0<'a> {
     pub fn deleted(&mut self) -> &mut Bool {
         &mut self.header.deleted
-    }
-    pub fn payload(&mut self) -> &mut [u16; 3] {
-        &mut self.header.payload
     }
 }
 
@@ -750,12 +875,15 @@ impl<'a> AddressTokensTupleReader<'a> {
 #[repr(C, align(8))]
 #[derive(Debug, Clone, FromBytes, IntoBytes, Immutable, KnownLayout)]
 struct DocumentTupleHeader {
+    is_null: Bool,
+    _padding: [Padding; 7],
     deleted: Bool,
     fieldnorm: u8,
     payload: [u16; 3],
 }
 
 pub struct DocumentTuple {
+    pub is_null: Bool,
     pub deleted: Bool,
     pub fieldnorm: u8,
     pub payload: [u16; 3],
@@ -764,6 +892,8 @@ pub struct DocumentTuple {
 impl Tuple for DocumentTuple {
     fn serialize(&self) -> Vec<u8> {
         DocumentTupleHeader {
+            is_null: self.is_null,
+            _padding: Default::default(),
             deleted: self.deleted,
             fieldnorm: self.fieldnorm,
             payload: self.payload,
@@ -799,6 +929,9 @@ pub struct DocumentTupleReader<'a> {
 }
 
 impl<'a> DocumentTupleReader<'a> {
+    pub fn is_null(self) -> bool {
+        self.header.is_null.into()
+    }
     pub fn fieldnorm(self) -> u8 {
         self.header.fieldnorm
     }
@@ -816,9 +949,6 @@ pub struct DocumentTupleWriter<'a> {
 }
 
 impl<'a> DocumentTupleWriter<'a> {
-    pub fn payload(&mut self) -> &mut [u16; 3] {
-        &mut self.header.payload
-    }
     pub fn deleted(&mut self) -> &mut Bool {
         &mut self.header.deleted
     }

@@ -17,12 +17,17 @@ use std::cmp::Ordering;
 // * On each page, tuples must be contiguous and ordered, starting from `1`.
 // * IDs must be ordered on all pages.
 
-pub fn write<R: RelationWrite>(index: &R, elements: &[([u8; WIDTH], (u32, u16))]) -> (u32, u32, u32)
+pub fn write<R: RelationWrite>(
+    index: &R,
+    elements: &[([u8; WIDTH], (u32, u16))],
+    generation: u64,
+    check: &impl Fn(),
+) -> (u32, u32, u32)
 where
     R::Page: Page<Opaque = Opaque>,
 {
     assert!(elements.is_sorted_by(|(l, (_, _)), (r, (_, _))| l < r));
-    let mut tape = BackwardTapeWriter::<_, AddressTokensTuple>::create(index);
+    let mut tape = BackwardTapeWriter::<_, AddressTokensTuple>::create(index, generation);
     let width_1 = AddressTokensTuple::fit(tape.freespace())
         .expect("implementation: a blank page cannot fit a single tuple") as u16;
     let mut buffer = Vec::new();
@@ -45,6 +50,7 @@ where
             let key = chunk.last().expect("impossible").into_inner().0;
             buffer.push(Edge::new((key, tape.tape_put(tuple).0)));
             tape.tape_move();
+            tape = tape.checkpoint(check);
         }
     }
     let start = buffer.first().map(|e| e.into_inner().1).unwrap_or(u32::MAX);
@@ -68,11 +74,7 @@ pub fn read<R: RelationRead>(
         let address_tuple = AddressTokensTuple::deserialize_ref(address_bytes);
         let edges = address_tuple.edges();
         let pos = edges.partition_point(|edge| edge.into_inner().0 < token_id);
-        if let Some(edge) = edges.get(pos) {
-            id = edge.into_inner().1;
-        } else {
-            return None;
-        }
+        id = edges.get(pos)?.into_inner().1;
     }
     let token_guard = index.read(id);
     let n = token_guard.len();

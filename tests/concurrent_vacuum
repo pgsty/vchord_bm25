@@ -1,0 +1,240 @@
+#!/usr/bin/env -S cargo +nightly -Zscript
+---cargo
+[package]
+name = "concurrent_vacuum"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+postgres = "0.19.14"
+---
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License v3 (AGPLv3).
+// See <https://www.gnu.org/licenses/agpl-3.0.html> for details.
+//
+// Copyright (c) 2025-2026 TensorChord Inc.
+// Copyright (c) 2026 PGSTY PTE. LTD.
+// Maintained by Ruohang Feng @ PGSTY (rh@vonng.com)
+
+use std::error::Error;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+use postgres::{CancelToken, Client, Config, NoTls};
+
+type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
+
+const GATE_NAMESPACE: i32 = 0x424d3235;
+const POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+fn explain(client: &mut Client, query: &str, index: &str, table: &str) -> Result<()> {
+    let plan = client
+        .query(&format!("EXPLAIN (COSTS OFF) {query}"), &[])?
+        .iter()
+        .map(|row| row.try_get::<_, String>(0))
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .join("\n");
+    println!("{plan}");
+    let expected = format!("Index Scan using {index} on {table}");
+    if !plan
+        .lines()
+        .any(|line| line.trim().trim_start_matches("-> ").trim() == expected)
+    {
+        return Err(format!("expected BM25 index scan: {expected}").into());
+    }
+    Ok(())
+}
+
+fn read_ids(client: &mut Client, query: &str) -> Result<Vec<i32>> {
+    Ok(client
+        .query(query, &[])?
+        .iter()
+        .map(|row| row.try_get(0))
+        .collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+fn check_ids(mut ids: Vec<i32>, last: i32) -> Result<()> {
+    ids.sort_unstable();
+    if ids.len() != last as usize || !ids.iter().copied().eq(1..=last) {
+        let count = ids.len();
+        ids.dedup();
+        return Err(format!(
+            "expected exactly 1..={last}; got {count} rows, {} unique IDs",
+            ids.len()
+        )
+        .into());
+    }
+    println!("Exactly {last} rows, {last} unique IDs (1..={last})");
+    Ok(())
+}
+
+fn reader_waits(client: &mut Client, pid: i32) -> Result<bool> {
+    Ok(client
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+         WHERE pid = $1 AND state = 'active' AND wait_event = 'advisory')",
+            &[&pid],
+        )?
+        .try_get(0)?)
+}
+
+fn finish_reader(reader: JoinHandle<Result<Vec<i32>>>, cancel: &CancelToken) -> Result<Vec<i32>> {
+    let deadline = Instant::now() + Duration::from_secs(65);
+    while !reader.is_finished() {
+        if Instant::now() >= deadline {
+            let cancellation = cancel.cancel_query(NoTls);
+            return Err(format!("reader timed out; cancellation: {cancellation:?}").into());
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+    // Only join a finished thread, with the advisory gate already released.
+    reader.join().map_err(|_| "reader thread panicked")?
+}
+
+fn main() -> Result<()> {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    let [params] = args.as_slice() else {
+        return Err("usage: concurrent_vacuum <connection-string>".into());
+    };
+    let mut config: Config = params.parse()?;
+    config.connect_timeout(Duration::from_secs(5));
+    let mut client = config.connect(NoTls)?;
+    client.batch_execute("SET statement_timeout = '15s';")?;
+    let key: i32 = client
+        .query_one("SELECT pg_backend_pid()", &[])?
+        .try_get(0)?;
+    let prefix = format!("concurrent_vacuum_{}_{}", std::process::id(), key);
+    let table = format!("{prefix}_documents");
+    let index = format!("{prefix}_bm25");
+    let predicate = format!("{prefix}_pause");
+    let vacuum = format!("VACUUM (INDEX_CLEANUP ON) public.{table}");
+    let query = format!(
+        "SELECT id FROM public.{table} WHERE public.{predicate}(id)
+         ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'search'), 'public.{index}')"
+    );
+    let mut created = false;
+    let mut gate = None;
+    let mut worker = None;
+    let mut cancel = None;
+
+    let outcome = catch_unwind(AssertUnwindSafe(|| -> Result<()> {
+        // One transaction makes setup all-or-nothing. Building the first 5000
+        // rows seals them; the 100 rows inserted afterwards are growing.
+        let mut setup = client.transaction()?;
+        setup.batch_execute(&format!(
+            "CREATE TABLE public.{table} (id integer PRIMARY KEY, vector tsvector NOT NULL)
+             WITH (autovacuum_enabled = off);
+             INSERT INTO public.{table}
+             SELECT i, to_tsvector('simple', 'search alpha ' || i)
+             FROM generate_series(1, 5000) AS i;
+             CREATE INDEX {index} ON public.{table} USING bm25 (vector bm25_ops)
+             WITH (limit = 3, prefilter = true, maintenance_min_rows = 1, maintenance_scale_factor = 0);
+             INSERT INTO public.{table}
+             SELECT i, to_tsvector('simple', 'search beta ' || i)
+             FROM generate_series(5001, 5100) AS i;
+             CREATE FUNCTION public.{predicate}(integer) RETURNS boolean
+             LANGUAGE plpgsql VOLATILE AS $$
+             BEGIN
+                 PERFORM pg_advisory_xact_lock({GATE_NAMESPACE}, {key});
+                 RETURN true;
+             END
+             $$;
+             ANALYZE public.{table};"
+        ))?;
+        setup.commit()?;
+        created = true;
+
+        let mut reader = config.connect(NoTls)?;
+        reader.batch_execute(
+            "SET statement_timeout = '60s';
+             SET enable_seqscan = off;
+             SET bm25.enable_scan = on;
+             SET bm25.prefilter = true;
+             SET \"bm25.limit\" = 3;",
+        )?;
+        let initial_query = format!("{query} LIMIT 10000");
+        explain(&mut reader, &initial_query, &index, &table)?;
+        let pid = reader
+            .query_one("SELECT pg_backend_pid()", &[])?
+            .try_get(0)?;
+        let mut gate_client = config.connect(NoTls)?;
+        gate_client.batch_execute("SET statement_timeout = '5s';")?;
+        gate_client.query_one("SELECT pg_advisory_lock($1, $2)", &[&GATE_NAMESPACE, &key])?;
+        gate = Some(gate_client);
+        cancel = Some(reader.cancel_token());
+        worker = Some(thread::Builder::new().spawn(move || read_ids(&mut reader, &initial_query))?);
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !reader_waits(gate.as_mut().unwrap(), pid)? {
+            if worker.as_ref().unwrap().is_finished() {
+                return Err("reader finished before entering the advisory gate".into());
+            }
+            if Instant::now() >= deadline {
+                return Err(
+                    "timed out waiting for pg_stat_activity.wait_event = 'advisory'".into(),
+                );
+            }
+            thread::sleep(POLL_INTERVAL);
+        }
+        println!("Reader is paused in the executor filter after its first batch (wait_event = advisory)");
+        client.batch_execute(&vacuum)?;
+        client.batch_execute(&format!(
+            "INSERT INTO public.{table}
+             SELECT i, to_tsvector('simple', 'search gamma delta ' || i)
+             FROM generate_series(5101, 10100) AS i;"
+        ))?;
+        client.batch_execute(&vacuum)?;
+        if !reader_waits(gate.as_mut().unwrap(), pid)? {
+            return Err("reader left the advisory gate during concurrent maintenance".into());
+        }
+        println!("Two VACUUMs and the 5000-row insert completed while the reader was blocked");
+        // Closing the gate session releases its advisory lock, including when
+        // an SQL error has made an explicit unlock impossible.
+        drop(gate.take());
+        println!("Original snapshot:");
+        check_ids(
+            finish_reader(worker.take().unwrap(), cancel.as_ref().unwrap())?,
+            5100,
+        )?;
+
+        client.batch_execute(&vacuum)?;
+        // Use a large first batch for the fresh snapshot containing 10100 rows.
+        client.batch_execute(
+            "SET enable_seqscan = off;
+             SET bm25.enable_scan = on;
+             SET bm25.prefilter = true;
+             SET \"bm25.limit\" = 20000;",
+        )?;
+        let fresh_query = format!("{query} LIMIT 20000");
+        explain(&mut client, &fresh_query, &index, &table)?;
+        println!("Fresh snapshot after final VACUUM:");
+        check_ids(read_ids(&mut client, &fresh_query)?, 10100)
+    }));
+
+    // Finally: release the gate before waiting or propagating any failure,
+    // including panics. A reader error is reported even if maintenance failed.
+    drop(gate);
+    if let Some(reader) = worker {
+        if let Err(error) = finish_reader(reader, cancel.as_ref().unwrap()) {
+            eprintln!("Reader failed: {error:?}");
+        }
+    }
+    let mut cleanup = Ok(());
+    if created {
+        for sql in [
+            format!("DROP TABLE public.{table}"),
+            format!("DROP FUNCTION public.{predicate}(integer)"),
+        ] {
+            if let Err(error) = client.batch_execute(&sql) {
+                eprintln!("Test object cleanup failed: {error:?}");
+                cleanup = Err(error.into());
+            }
+        }
+    }
+    match outcome {
+        Ok(result) => result.and(cleanup),
+        Err(panic) => resume_unwind(panic),
+    }
+}

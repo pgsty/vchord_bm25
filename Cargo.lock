@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "always_equal"
-version = "0.0.0"
+version = "1.0.0"
 
 [[package]]
 name = "anstream"
@@ -140,7 +140,7 @@ dependencies = [
 
 [[package]]
 name = "bm25"
-version = "0.0.0"
+version = "1.0.0"
 dependencies = [
  "always_equal",
  "blake3",
@@ -654,7 +654,7 @@ checksum = "964de6e86d545b246d84badc0fef527924ace5134f30641c203ef52ba83f58d5"
 
 [[package]]
 name = "index"
-version = "0.0.0"
+version = "1.0.0"
 dependencies = [
  "always_equal",
  "zerocopy",
@@ -1109,7 +1109,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "score"
-version = "0.0.0"
+version = "1.0.0"
 dependencies = [
  "zerocopy",
 ]
@@ -1202,7 +1202,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "simd"
-version = "0.0.0"
+version = "1.0.0"
 dependencies = [
  "rand",
  "seq-macro",
@@ -1218,7 +1218,7 @@ checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
 name = "simd_macros"
-version = "0.0.0"
+version = "1.0.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1500,7 +1500,7 @@ dependencies = [
 
 [[package]]
 name = "vchord_bm25"
-version = "0.0.0"
+version = "1.0.0"
 dependencies = [
  "always_equal",
  "bm25",
@@ -1653,7 +1653,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.0.0"
+version = "1.0.0"
 dependencies = [
  "clap",
  "object",

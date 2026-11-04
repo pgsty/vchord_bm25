@@ -16,6 +16,7 @@ use index::tuples::Bool;
 
 pub struct Flushed {
     pub number_of_documents: u32,
+    pub number_of_nulls: u32,
     pub sum_of_document_lengths: u64,
     pub width_1_documents: u16,
     pub width_0_documents: u16,
@@ -36,40 +37,65 @@ pub fn flush<R: RelationWrite, D: IntoIterator<Item = Record>, M: IntoIterator<I
     b: f64,
     index: &R,
     segment: Segment<D, M>,
+    generation: u64,
+    check: &impl Fn(),
 ) -> Flushed
 where
     R::Page: Page<Opaque = Opaque>,
 {
     let mut number_of_documents = 0_u32;
+    let mut number_of_nulls = 0_u32;
     let mut sum_of_document_lengths = 0_u64;
     let mut fieldnorms = Vec::new();
     let mut map_documents = Vec::new();
-    let mut tape_documents = TapeWriter::<_, DocumentTuple>::create(index);
-    for Record(document_length, payload) in segment.records.into_iter() {
+    let mut tape_documents = TapeWriter::<_, DocumentTuple>::create(index, generation);
+    for Record(document_length, payload, is_null) in segment.records.into_iter() {
+        if number_of_documents % 1024 == 0 {
+            tape_documents.checkpoint(check);
+        }
         number_of_documents += 1;
+        number_of_nulls += u32::from(is_null != 0);
         sum_of_document_lengths += document_length as u64;
         let fieldnorm = length_to_fieldnorm(document_length);
         fieldnorms.push(fieldnorm);
         map_documents.push(tape_documents.push(DocumentTuple {
             fieldnorm,
+            is_null: Bool::from(is_null != 0),
             payload,
             deleted: Bool::FALSE,
         }));
     }
 
-    let avgdl = sum_of_document_lengths as f64 / number_of_documents as f64;
+    let ptr_documents = tape_documents.first();
+    drop(tape_documents);
+    check();
+
+    let avgdl = if number_of_documents == number_of_nulls {
+        0.0
+    } else {
+        sum_of_document_lengths as f64 / (number_of_documents - number_of_nulls) as f64
+    };
 
     let mut mappings = segment.mappings.into_iter().peekable();
     let mut map_tokens = Vec::new();
-    let mut tape_tokens = TapeWriter::<_, TokenTuple>::create(index);
-    let mut tape_summaries = TapeWriter::<_, SummaryTuple>::create(index);
-    let mut tape_blocks = TapeWriter::<_, BlockTuple>::create(index);
+    let mut tape_tokens = TapeWriter::<_, TokenTuple>::create(index, generation);
+    let mut tape_summaries = TapeWriter::<_, SummaryTuple>::create(index, generation);
+    let mut tape_blocks = TapeWriter::<_, BlockTuple>::create(index, generation);
     while let Some(token_id) = mappings.peek().map(|&Mapping(token_id, ..)| token_id) {
         let mut token_number_of_documents = 0_u32;
         let mut token_wand = Wand::new();
         let mut wptr_summaries = (tape_summaries.first(), 1);
         let mut ordinal = 0_usize;
         while Some(token_id) == mappings.peek().map(|&Mapping(token_id, ..)| token_id) {
+            if ordinal % 128 == 0 {
+                tape_tokens.release();
+                tape_summaries.release();
+                tape_blocks.release();
+                check();
+                tape_tokens.acquire();
+                tape_summaries.acquire();
+                tape_blocks.acquire();
+            }
             let block = {
                 let func = |Mapping(i, ..): &Mapping| &token_id == i;
                 let mut internal = Vec::with_capacity(128);
@@ -129,12 +155,19 @@ where
         ));
     }
 
+    let ptr_tokens = tape_tokens.first();
+    let ptr_summaries = tape_summaries.first();
+    let ptr_blocks = tape_blocks.first();
+    drop((tape_tokens, tape_summaries, tape_blocks));
+    check();
     let (width_1_documents, width_0_documents, depth_documents, start_documents, free_documents) =
-        address_documents::write(index, &map_documents);
-    let (depth_tokens, start_tokens, free_tokens) = address_tokens::write(index, &map_tokens);
+        address_documents::write(index, &map_documents, generation, check);
+    let (depth_tokens, start_tokens, free_tokens) =
+        address_tokens::write(index, &map_tokens, generation, check);
 
     Flushed {
         number_of_documents,
+        number_of_nulls,
         sum_of_document_lengths,
         width_1_documents,
         width_0_documents,
@@ -144,10 +177,10 @@ where
         depth_tokens,
         start_tokens,
         free_tokens,
-        ptr_documents: { tape_documents }.first(),
-        ptr_tokens: { tape_tokens }.first(),
-        ptr_summaries: { tape_summaries }.first(),
-        ptr_blocks: { tape_blocks }.first(),
+        ptr_documents,
+        ptr_tokens,
+        ptr_summaries,
+        ptr_blocks,
     }
 }
 

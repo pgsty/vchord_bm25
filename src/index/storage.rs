@@ -147,6 +147,9 @@ impl<O: Opaque> Page for PostgresPage<O> {
             page_init(self, opaque);
         }
     }
+    fn is_new(&self) -> bool {
+        self.header.pd_upper == 0
+    }
 }
 
 unsafe fn page_init<O: Opaque>(this: *mut PostgresPage<O>, opaque: O) {
@@ -221,7 +224,9 @@ impl<O: Opaque> DerefMut for PostgresBufferWriteGuard<O> {
 impl<O: Opaque> Drop for PostgresBufferWriteGuard<O> {
     fn drop(&mut self) {
         unsafe {
-            if std::thread::panicking() {
+            if self.state.is_null() {
+                // Already committed as part of a multi-page record.
+            } else if std::thread::panicking() {
                 pgrx::pg_sys::GenericXLogAbort(self.state);
             } else {
                 pgrx::pg_sys::GenericXLogFinish(self.state);
@@ -291,6 +296,40 @@ impl<O: Opaque> RelationWriteTypes for PostgresRelation<O> {
 }
 
 impl<O: Opaque> RelationWrite for PostgresRelation<O> {
+    fn commit_pair<'a>(
+        &'a self,
+        mut left: Self::WriteGuard<'a>,
+        mut right: Self::WriteGuard<'a>,
+    ) -> Self::WriteGuard<'a> {
+        unsafe {
+            use pgrx::pg_sys::*;
+            let state = GenericXLogStart(self.raw);
+            // Copy the pending page images before aborting their individual
+            // records. The link must never become durable before its target.
+            let l = GenericXLogRegisterBuffer(state, left.buf, 0);
+            let r = GenericXLogRegisterBuffer(state, right.buf, GENERIC_XLOG_FULL_IMAGE as _);
+            std::ptr::copy_nonoverlapping(
+                left.page.as_ptr().cast::<u8>(),
+                l.cast(),
+                BLCKSZ as usize,
+            );
+            std::ptr::copy_nonoverlapping(
+                right.page.as_ptr().cast::<u8>(),
+                r.cast(),
+                BLCKSZ as usize,
+            );
+            GenericXLogAbort(left.state);
+            GenericXLogAbort(right.state);
+            left.state = std::ptr::null_mut();
+            right.state = std::ptr::null_mut();
+            GenericXLogFinish(state);
+            drop(left);
+            right.state = GenericXLogStart(self.raw);
+            right.page =
+                NonNull::new(GenericXLogRegisterBuffer(right.state, right.buf, 0).cast()).unwrap();
+            right
+        }
+    }
     fn write(&self, id: u32) -> PostgresBufferWriteGuard<O> {
         assert!(id != u32::MAX, "no such page");
         unsafe {
@@ -365,11 +404,13 @@ impl<O: Opaque> RelationWrite for PostgresRelation<O> {
                         ReadBufferMode::RBM_NORMAL,
                         std::ptr::null_mut(),
                     );
-                    UnlockRelationForExtension(self.raw, ExclusiveLock as _);
+                    // Lock the new page before other backends can see it as
+                    // an all-zero page (a maintenance sweep reports those free).
                     LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE as _);
+                    UnlockRelationForExtension(self.raw, ExclusiveLock as _);
                     buf
                 }
-                #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
+                #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18", feature = "pg19"))]
                 {
                     use pgrx::pg_sys::{
                         BufferManagerRelation, ExtendBufferedFlags, ExtendBufferedRel, ForkNumber,
@@ -413,6 +454,19 @@ impl<O: Opaque> RelationWrite for PostgresRelation<O> {
             pgrx::pg_sys::IndexFreeSpaceMapVacuum(self.raw);
         }
     }
+    fn npages(&self) -> u32 {
+        unsafe {
+            pgrx::pg_sys::RelationGetNumberOfBlocksInFork(
+                self.raw,
+                pgrx::pg_sys::ForkNumber::MAIN_FORKNUM,
+            )
+        }
+    }
+    fn record_free(&self, id: u32) {
+        unsafe {
+            pgrx::pg_sys::RecordFreeIndexPage(self.raw, id);
+        }
+    }
 }
 
 impl<O: Opaque> RelationPrefetch for PostgresRelation<O> {
@@ -437,5 +491,23 @@ fn lp_flags(x: pgrx::pg_sys::ItemIdData) -> u32 {
 #[allow(dead_code)]
 #[must_use]
 fn box_into_non_null<T>(b: Box<T>) -> NonNull<T> {
-    unsafe { NonNull::new_unchecked(Box::into_raw(b)) }
+    NonNull::new(Box::into_raw(b)).unwrap()
+}
+
+// Readers detect index pages recycled under them. On a primary that is
+// corruption; on a hot standby without `hot_standby_feedback` the primary's
+// recycling horizon does not cover the query, so it is a recovery conflict.
+pub fn reader() -> bm25::Reader<'static> {
+    fn conflict() {
+        pgrx::ereport!(
+            ERROR,
+            pgrx::PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE,
+            "canceling statement due to conflict with bm25 index maintenance",
+            "Index pages read by this query were recycled by maintenance on the primary. Retry the query, or enable hot_standby_feedback."
+        );
+    }
+    bm25::Reader {
+        in_recovery: unsafe { pgrx::pg_sys::RecoveryInProgress() },
+        conflict: &conflict,
+    }
 }

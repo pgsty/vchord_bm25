@@ -7,155 +7,85 @@
 // Maintained by Ruohang Feng @ PGSTY (rh@vonng.com)
 
 use crate::bm25::Cache;
+use crate::checked::{Checked, Reader};
+use crate::prepared::Prepared;
 use crate::tape::TruncatedTapeReader;
 use crate::tuples::*;
-use crate::vector::{Element, Query};
-use crate::{Opaque, WIDTH, address_documents, address_tokens, compression};
-use always_equal::AlwaysEqual;
+use crate::{Opaque, address_documents, compression};
 use index::relation::{Page, RelationRead};
 use score::Score;
 use std::cmp::{Ordering, Reverse};
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashSet};
 use std::iter::chain;
 use std::num::NonZero;
 
 pub fn search<R: RelationRead>(
     index: &R,
     k: NonZero<usize>,
-    query: &Query,
+    prepared: &Prepared,
+    after: Option<(f64, [u16; 3])>,
     mut filter: impl FnMut([u16; 3]) -> bool,
-) -> Vec<(Reverse<Score>, AlwaysEqual<[u16; 3]>)>
+    mut check: impl FnMut(),
+    reader: Reader<'_>,
+) -> Vec<(Reverse<Score>, [u16; 3])>
 where
     R::Page: Page<Opaque = Opaque>,
 {
-    let meta_guard = index.read(0);
-    let meta_bytes = meta_guard.get(1).expect("data corruption");
-    let meta_tuple = MetaTuple::deserialize_ref(meta_bytes);
-    let k1 = meta_tuple.k1();
-    let b = meta_tuple.b();
-    let ptr_jump = meta_tuple.ptr_jump();
-    drop(meta_guard);
-
-    let jump_guard = index.read(ptr_jump);
-    let jump_bytes = jump_guard.get(1).expect("data corruption");
-    let jump_tuple = JumpTuple::deserialize_ref(jump_bytes);
-
-    let sum_of_document_lengths = jump_tuple.sum_of_document_lengths();
-    let number_of_documents = jump_tuple.number_of_documents();
-    let avgdl = sum_of_document_lengths as f64 / number_of_documents as f64;
-
-    let mut tokens = Vec::new();
-    for &key in query.iter() {
-        let Some((token_guard, token_i)) = address_tokens::read(
-            index,
-            jump_tuple.depth_tokens(),
-            jump_tuple.start_tokens(),
-            key,
-        ) else {
-            continue;
-        };
-        let token_bytes = token_guard.get(token_i).expect("data corruption");
-        let token_tuple = TokenTuple::deserialize_ref(token_bytes);
-        tokens.push(Token {
-            id: key,
-            number_of_documents: token_tuple.number_of_documents(),
-            wand_fieldnorm: token_tuple.wand_fieldnorm(),
-            wand_term_frequency: token_tuple.wand_term_frequency(),
-            wptr_summaries: token_tuple.wptr_summaries(),
-            bm25: Cache::new(
-                number_of_documents,
-                token_tuple.number_of_documents(),
-                k1,
-                b,
-                avgdl,
-            ),
-        });
-    }
-
+    let after = after.map(|(score, tid)| (Reverse(Score::from_f64(score)), tid));
+    let remaining = |score: f64, tid: [u16; 3]| {
+        after.is_none_or(|a| (Reverse(Score::from_f64(score)), tid) > a)
+    };
+    let jump = prepared.jump;
+    let sealed = Checked::new(index, jump.generation, reader);
+    let index = &sealed;
     let mut results = Results::<[u16; 3]>::new(k, 0.0);
-
-    {
-        let first = jump_tuple.ptr_vectors();
-        assert!(first != u32::MAX);
-        let mut state = None;
-        let mut current = first;
-        while current != u32::MAX {
-            let vector_guard = index.read(current);
-            for i in 1..=vector_guard.len() {
-                let vector_bytes = vector_guard.get(i).expect("data corruption");
-                let vector_tuple = VectorTuple::deserialize_ref(vector_bytes);
-                match vector_tuple {
-                    VectorTupleReader::_2(vector_tuple) => {
-                        state = Some((vector_tuple.fieldnorm(), 0.0));
-                    }
-                    VectorTupleReader::_1(vector_tuple) => {
-                        if let Some((fieldnorm, result)) = state.as_mut() {
-                            for &Element { key, value } in vector_tuple.elements() {
-                                if let Ok(i) = tokens.binary_search_by_key(&key, |t| t.id) {
-                                    let token = &tokens[i];
-                                    let term_frequency = value;
-                                    *result += token.bm25.evaluate(*fieldnorm, term_frequency);
-                                }
-                            }
-                        } else {
-                            panic!("data corruption");
-                        }
-                    }
-                    VectorTupleReader::_0(vector_tuple) => {
-                        if let Some((fieldnorm, mut result)) = state.take() {
-                            if !bool::from(vector_tuple.deleted()) {
-                                for &Element { key, value } in vector_tuple.elements() {
-                                    if let Ok(i) = tokens.binary_search_by_key(&key, |t| t.id) {
-                                        let token = &tokens[i];
-                                        let term_frequency = value;
-                                        result += token.bm25.evaluate(fieldnorm, term_frequency);
-                                    }
-                                }
-                                if results.threshold() < result {
-                                    let payload = vector_tuple.payload();
-                                    if filter(payload) {
-                                        results.push(result, payload);
-                                    }
-                                }
-                            }
-                        } else {
-                            panic!("data corruption");
-                        }
-                    }
-                }
-            }
-            current = vector_guard.get_opaque().next;
+    let mut matched = HashSet::new();
+    for growing in &prepared.growing {
+        check();
+        if growing.score > 0.0
+            && remaining(growing.score, growing.payload)
+            && results.threshold() <= growing.score
+            && filter(growing.payload)
+        {
+            results.push(growing.score, growing.payload);
         }
     }
 
     let mut cursors = Vec::new();
-    for token in tokens {
-        cursors.push(Box::new(Cursor::new(
-            index,
-            token.number_of_documents,
-            token.wand_fieldnorm,
-            token.wand_term_frequency,
-            token.wptr_summaries,
-            token.bm25,
-        )));
+    for (ordinal, token) in prepared.tokens.iter().enumerate() {
+        if let Some(wptr_summaries) = token.wptr_summaries {
+            cursors.push(Box::new(Cursor::new(
+                index,
+                token.number_of_documents,
+                token.wand_fieldnorm,
+                token.wand_term_frequency,
+                wptr_summaries,
+                token.bm25.clone(),
+                token.bound.clone(),
+                prepared.bound_scale,
+                ordinal,
+            )));
+        }
+        check();
     }
 
     let mut tail = Vec::<Box<Cursor>>::new();
     let mut head = BinaryHeap::from(cursors);
     'main: loop {
+        check();
         let lead = 'lead: {
             let mut sum = 0.0f64;
             for cursor in tail.iter() {
-                sum += cursor.token_upper_bound();
+                sum = (sum + cursor.token_upper_bound()).next_up();
             }
             while let Some(cursor) = head.pop() {
                 if cursor.document_id() == u32::MAX {
                     break 'main;
                 }
-                if results.threshold() < sum + cursor.token_upper_bound() {
+                if results.threshold() <= (sum + cursor.token_upper_bound()).next_up() {
                     break 'lead cursor;
                 } else {
-                    sum += cursor.token_upper_bound();
+                    sum = (sum + cursor.token_upper_bound()).next_up();
                     tail.push(cursor);
                 }
             }
@@ -170,7 +100,7 @@ where
         }
         {
             let mut failures = tail.extract_if(.., |cursor| {
-                cursor.seek_block(index, document_id);
+                cursor.seek_block(index, document_id, &mut check);
                 document_id < cursor.document_id()
             });
             if let Some(failure) = failures.next() {
@@ -187,17 +117,17 @@ where
         let sum_of_block_upper_bounds = {
             let mut result = 0.0;
             for cursor in tail.iter() {
-                result += cursor.block_upper_bound();
+                result = (result + cursor.block_upper_bound()).next_up();
             }
             for cursor in lead.iter() {
-                result += cursor.block_upper_bound();
+                result = (result + cursor.block_upper_bound()).next_up();
             }
             result
         };
-        if results.threshold() < sum_of_block_upper_bounds {
+        if results.threshold() <= sum_of_block_upper_bounds {
             {
                 let mut failures = tail.extract_if(.., |cursor| {
-                    cursor.seek(index, document_id);
+                    cursor.seek(index, document_id, &mut check);
                     document_id < cursor.document_id()
                 });
                 if let Some(failure) = failures.next() {
@@ -208,29 +138,41 @@ where
                     continue 'main;
                 }
             };
-            let (document_guard, document_i) = address_documents::read(
-                index,
-                jump_tuple.width_1_documents(),
-                jump_tuple.width_0_documents(),
-                jump_tuple.depth_documents(),
-                jump_tuple.start_documents(),
-                document_id,
-            )
-            .expect("data corruption");
-            let document_bytes = document_guard.get(document_i).expect("data corruption");
-            let document_tuple = DocumentTuple::deserialize_ref(document_bytes);
-            let fieldnorm = document_tuple.fieldnorm();
-            let payload = document_tuple.payload();
-            if filter(payload) {
+            let (fieldnorm, payload, deleted) = {
+                let (document_guard, document_i) = address_documents::read(
+                    index,
+                    jump.width_1_documents,
+                    jump.width_0_documents,
+                    jump.depth_documents,
+                    jump.start_documents,
+                    document_id,
+                )
+                .expect("data corruption");
+                let document_bytes = document_guard.get(document_i).expect("data corruption");
+                let document_tuple = DocumentTuple::deserialize_ref(document_bytes);
+                (
+                    document_tuple.fieldnorm(),
+                    document_tuple.payload(),
+                    bool::from(document_tuple.deleted()),
+                )
+            };
+            check();
+            matched.insert(document_id);
+            if !deleted {
                 let mut result = 0.0;
-                for cursor in chain(tail.iter_mut(), lead.iter_mut()) {
+                let mut ordered = chain(tail.iter_mut(), lead.iter_mut()).collect::<Vec<_>>();
+                ordered.sort_unstable_by_key(|c| c.ordinal);
+                for cursor in ordered {
                     let term_frequency = cursor.get(index);
                     result += cursor.bm25().evaluate(fieldnorm, term_frequency);
                 }
-                results.push(result, payload);
+                if remaining(result, payload) && filter(payload) {
+                    results.push(result, payload);
+                }
+                check();
             }
             for mut cursor in chain(tail, lead) {
-                cursor.seek(index, 1 + document_id);
+                cursor.seek(index, 1 + document_id, &mut check);
                 head.push(cursor);
             }
             tail = Vec::new();
@@ -265,23 +207,64 @@ where
                 }
                 array[argmax.0].remove(argmax.1)
             };
-            cursor.seek(index, seek_document_id);
+            cursor.seek(index, seek_document_id, &mut check);
             head.push(cursor);
             for cursor in lead.into_iter() {
                 head.push(cursor);
             }
         }
     }
+    if results.internal.len() < k.get() {
+        // No positive result was pruned when the heap never filled. Complete
+        // SQL ORDER BY with zero scores and NULLs, including empty queries.
+        let mut page = jump.ptr_documents;
+        let mut id = 0_u32;
+        while page != u32::MAX {
+            let (next, docs) = {
+                let guard = index.read(page);
+                let docs = (1..=guard.len())
+                    .map(|i| {
+                        let t =
+                            DocumentTuple::deserialize_ref(guard.get(i).expect("data corruption"));
+                        (t.payload(), bool::from(t.deleted()), t.is_null())
+                    })
+                    .collect::<Vec<_>>();
+                (guard.get_opaque().next, docs)
+            };
+            for (payload, deleted, is_null) in docs {
+                let score = if is_null { f64::NEG_INFINITY } else { 0.0 };
+                if !deleted
+                    && !matched.contains(&id)
+                    && remaining(score, payload)
+                    && filter(payload)
+                {
+                    results.push(score, payload);
+                }
+                id += 1;
+                check();
+            }
+            page = next;
+        }
+        for growing in &prepared.growing {
+            if growing.score <= 0.0
+                && remaining(growing.score, growing.payload)
+                && filter(growing.payload)
+            {
+                results.push(growing.score, growing.payload);
+            }
+            check();
+        }
+    }
     results.into_sorted_vec()
 }
 
-struct Results<T> {
+struct Results<T: Ord> {
     limit: NonZero<usize>,
     threshold: Score,
-    internal: BinaryHeap<(Reverse<Score>, AlwaysEqual<T>)>,
+    internal: BinaryHeap<(Reverse<Score>, T)>,
 }
 
-impl<T> Results<T> {
+impl<T: Ord> Results<T> {
     fn new(limit: NonZero<usize>, threshold: f64) -> Self {
         Self {
             limit,
@@ -293,8 +276,7 @@ impl<T> Results<T> {
         self.threshold.to_f64()
     }
     fn push(&mut self, key: f64, value: T) {
-        self.internal
-            .push((Reverse(Score::from_f64(key)), AlwaysEqual(value)));
+        self.internal.push((Reverse(Score::from_f64(key)), value));
         if self.internal.len() > self.limit.get() {
             self.internal.pop();
         }
@@ -302,13 +284,16 @@ impl<T> Results<T> {
             self.threshold = self.threshold.max(self.internal.peek().unwrap().0.0);
         }
     }
-    fn into_sorted_vec(self) -> Vec<(Reverse<Score>, AlwaysEqual<T>)> {
+    fn into_sorted_vec(self) -> Vec<(Reverse<Score>, T)> {
         self.internal.into_sorted_vec()
     }
 }
 
 struct Cursor {
     bm25: Cache,
+    bound: Cache,
+    bound_scale: f64,
+    ordinal: usize,
     token_upper_bound: f64,
 
     document_id: u32,
@@ -350,11 +335,19 @@ impl Cursor {
         token_wand_term_frequency: u32,
         wptr_summaries: (u32, u16),
         bm25: Cache,
+        bound: Cache,
+        bound_scale: f64,
+        ordinal: usize,
     ) -> Self
     where
         R::Page: Page<Opaque = Opaque>,
     {
-        let token_upper_bound = bm25.evaluate(token_wand_fieldnorm, token_wand_term_frequency);
+        let token_upper_bound = upper_bound(
+            &bound,
+            bound_scale,
+            token_wand_fieldnorm,
+            token_wand_term_frequency,
+        );
         let mut incoming = TruncatedTapeReader::new(
             index,
             wptr_summaries,
@@ -372,9 +365,17 @@ impl Cursor {
             token_number_of_documents.div_ceil(128),
         );
         let summary = next_summary(&mut incoming, index);
-        let block_upper_bound = bm25.evaluate(summary.wand_fieldnorm, summary.wand_term_frequency);
+        let block_upper_bound = upper_bound(
+            &bound,
+            bound_scale,
+            summary.wand_fieldnorm,
+            summary.wand_term_frequency,
+        );
         Cursor {
             bm25,
+            bound,
+            bound_scale,
+            ordinal,
             token_upper_bound,
             document_id: summary.min_document_id,
             position_in_block: 0,
@@ -403,7 +404,7 @@ impl Cursor {
     fn block_upper_bound(&self) -> f64 {
         self.block_upper_bound
     }
-    fn seek_block<R: RelationRead>(&mut self, index: &R, document_id: u32)
+    fn seek_block<R: RelationRead>(&mut self, index: &R, document_id: u32, check: &mut impl FnMut())
     where
         R::Page: Page<Opaque = Opaque>,
     {
@@ -414,20 +415,23 @@ impl Cursor {
         }
         while self.summary.max_document_id < document_id {
             self.summary = next_summary(&mut self.incoming, index);
+            check();
         }
         self.document_id = self.summary.min_document_id;
         self.position_in_block = 0;
-        self.block_upper_bound = self.bm25().evaluate(
+        self.block_upper_bound = upper_bound(
+            &self.bound,
+            self.bound_scale,
             self.summary.wand_fieldnorm,
             self.summary.wand_term_frequency,
         );
         self.filled = false;
     }
-    fn seek<R: RelationRead>(&mut self, index: &R, document_id: u32)
+    fn seek<R: RelationRead>(&mut self, index: &R, document_id: u32, check: &mut impl FnMut())
     where
         R::Page: Page<Opaque = Opaque>,
     {
-        self.seek_block(index, document_id);
+        self.seek_block(index, document_id, check);
         if document_id <= self.document_id {
             return;
         }
@@ -444,6 +448,7 @@ impl Cursor {
                 self.summary.wptr_block,
             );
             self.filled = true;
+            check();
         }
         (self.document_id, self.position_in_block) = {
             let document_ids = self.block.document_ids.as_slice();
@@ -511,15 +516,6 @@ fn fill_block<R: RelationRead>(
     );
 }
 
-struct Token {
-    id: [u8; WIDTH],
-    number_of_documents: u32,
-    wand_fieldnorm: u8,
-    wand_term_frequency: u32,
-    wptr_summaries: (u32, u16),
-    bm25: Cache,
-}
-
 struct Summary {
     min_document_id: u32,
     max_document_id: u32,
@@ -543,4 +539,60 @@ fn binary_heap_pop_if<T: Ord>(
 ) -> Option<T> {
     let top = this.peek()?;
     if predicate(top) { this.pop() } else { None }
+}
+
+// Round outward: the real-valued scaling inequality must remain an upper
+// bound after floating-point evaluation and summation. Zero TF is a sentinel.
+fn upper_bound(cache: &Cache, scale: f64, fieldnorm: u8, tf: u32) -> f64 {
+    if tf == 0 {
+        0.0
+    } else {
+        (cache.evaluate(fieldnorm, tf) * scale * (1.0 + 16.0 * f64::EPSILON)).next_up()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::upper_bound;
+    use crate::bm25::{Cache, Wand};
+
+    #[test]
+    fn scaled_wand_bound_covers_every_document_after_length_drift() {
+        let mut random = 20261103_u64;
+        let mut next = || {
+            random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (random >> 32) as u32
+        };
+        for k1 in [1.2, 2.0] {
+            for b in [0.0, 0.75, 1.0] {
+                for drift in [0.001, 0.1, 1.0, 10.0, 1000.0] {
+                    for _ in 0..100 {
+                        let avg_build = f64::from(next() % 10000 + 1);
+                        let avg_query = avg_build * drift;
+                        let mut wand = Wand::new();
+                        let documents = (0..128)
+                            .map(|_| ((next() % 128) as u8, next() % 256 + 1))
+                            .collect::<Vec<_>>();
+                        for &(norm, tf) in &documents {
+                            wand.push(norm, tf, k1, b, avg_build);
+                        }
+                        let build = Cache::new(10000, 3000, k1, b, avg_build);
+                        let query = Cache::new(10000, 3000, k1, b, avg_query);
+                        let bound = upper_bound(
+                            &build,
+                            drift.max(1.0),
+                            wand.fieldnorm(),
+                            wand.term_frequency(),
+                        );
+                        for (norm, tf) in documents {
+                            assert!(
+                                bound >= query.evaluate(norm, tf),
+                                "unsafe bound: k1={k1} b={b} drift={drift}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

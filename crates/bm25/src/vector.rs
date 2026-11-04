@@ -38,9 +38,19 @@ pub struct Element {
 #[derive(Debug, Clone)]
 pub struct Document {
     internal: Vec<Element>,
+    is_null: bool,
 }
 
 impl Document {
+    pub fn null() -> Self {
+        Self {
+            internal: Vec::new(),
+            is_null: true,
+        }
+    }
+    pub fn is_null(&self) -> bool {
+        self.is_null
+    }
     #[inline(always)]
     pub fn new(internal: Vec<Element>) -> Self {
         Self::checked_new(internal).expect("invalid data")
@@ -54,7 +64,10 @@ impl Document {
         if !internal.iter().all(|&Element { value, .. }| value != 0) {
             return None;
         }
-        Some(Self { internal })
+        Some(Self {
+            internal,
+            is_null: false,
+        })
     }
 
     #[inline(always)]
@@ -87,7 +100,7 @@ impl Document {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Query {
     internal: Vec<[u8; WIDTH]>,
 }

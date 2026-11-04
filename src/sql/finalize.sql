@@ -19,7 +19,10 @@ CREATE FUNCTION bm25_amhandler(internal) RETURNS index_am_handler
 IMMUTABLE STRICT PARALLEL SAFE LANGUAGE c AS 'MODULE_PATHNAME', '_bm25_amhandler_wrapper';
 
 CREATE FUNCTION to_bm25query(tsvector, regclass) RETURNS bm25query
-IMMUTABLE PARALLEL SAFE LANGUAGE sql AS 'SELECT ROW($1, $2)::bm25query';
+IMMUTABLE STRICT PARALLEL SAFE LANGUAGE sql RETURN ROW($1, $2)::bm25query;
+
+CREATE FUNCTION bm25_maintain(regclass) RETURNS boolean
+VOLATILE STRICT PARALLEL UNSAFE LANGUAGE c AS 'MODULE_PATHNAME', '_bm25_maintain_wrapper';
 
 -- List of access methods
 

@@ -1,0 +1,66 @@
+query I
+SELECT (extrelocatable AND NOT EXISTS (
+    SELECT 1 FROM pg_type WHERE typname = 'bm25vector'
+))::int FROM pg_extension WHERE extname = 'vchord_bm25';
+----
+1
+
+query T
+SELECT pg_get_function_result('to_bm25query(tsvector,regclass)'::regprocedure);
+----
+bm25query
+
+query T
+SELECT atttypid::regtype FROM pg_attribute
+WHERE attrelid = (SELECT typrelid FROM pg_type WHERE oid = 'bm25query'::regtype)
+AND attnum > 0 ORDER BY attnum;
+----
+tsvector
+regclass
+
+# The constructor must remain usable with schema-qualified calls even when
+# the extension's schema is absent from search_path, also after relocation.
+statement ok
+CREATE SCHEMA bm25_moved;
+
+statement ok
+ALTER EXTENSION vchord_bm25 SET SCHEMA bm25_moved;
+
+query T
+SELECT (bm25_moved.to_bm25query(to_tsvector('simple', 'Search'), 'pg_class')).vector::text;
+----
+'search':1
+
+query I
+SELECT (bm25_moved.to_bm25query(NULL::tsvector, 'pg_class') IS NULL)::int;
+----
+1
+
+statement ok
+CREATE ROLE bm25_schema_reader;
+
+statement ok
+GRANT USAGE ON SCHEMA bm25_moved TO bm25_schema_reader;
+
+statement ok
+SET ROLE bm25_schema_reader;
+
+query T
+SELECT (bm25_moved.to_bm25query(to_tsvector('simple', 'Search'), 'pg_class')).vector::text;
+----
+'search':1
+
+statement ok
+RESET ROLE;
+
+statement ok
+REVOKE USAGE ON SCHEMA bm25_moved FROM bm25_schema_reader;
+
+statement ok
+DROP ROLE bm25_schema_reader;
+
+statement ok
+ALTER EXTENSION vchord_bm25 SET SCHEMA public;
+
+statement ok
+DROP SCHEMA bm25_moved;

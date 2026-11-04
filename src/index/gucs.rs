@@ -11,7 +11,7 @@ use std::ffi::CStr;
 
 static BM25_ENABLE_SCAN: GucSetting<bool> = GucSetting::<bool>::new(true);
 
-static BM25_LIMIT: GucSetting<i32> = GucSetting::<i32>::new(0);
+static BM25_LIMIT: GucSetting<i32> = GucSetting::<i32>::new(100);
 
 static mut BM25_LIMIT_CONFIG: *mut pgrx::pg_sys::config_generic = core::ptr::null_mut();
 
@@ -49,7 +49,13 @@ pub fn init() {
     unsafe {
         #[cfg(feature = "pg14")]
         pgrx::pg_sys::EmitWarningsOnPlaceholders(c"bm25".as_ptr());
-        #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17", feature = "pg18"))]
+        #[cfg(any(
+            feature = "pg15",
+            feature = "pg16",
+            feature = "pg17",
+            feature = "pg18",
+            feature = "pg19"
+        ))]
         pgrx::pg_sys::MarkGUCPrefixReserved(c"bm25".as_ptr());
     }
     assert!(crate::is_main());
@@ -78,7 +84,7 @@ pub fn init() {
             assert!(check(*ptr, name), "failed to find GUC {name:?}");
         }
     }
-    #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
+    #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18", feature = "pg19"))]
     unsafe {
         use pgrx::pg_sys::PGERROR;
         for (name, ptr) in targets {
@@ -113,7 +119,7 @@ pub fn bm25_limit(index: pgrx::pg_sys::Relation) -> u32 {
         x as u32
     }
     assert!(crate::is_main());
-    const DEFAULT: i32 = 0;
+    const DEFAULT: i32 = 100;
     if unsafe { (*BM25_LIMIT_CONFIG).source } != pgrx::pg_sys::GucSource::PGC_S_DEFAULT {
         let value = BM25_LIMIT.get();
         parse(value)

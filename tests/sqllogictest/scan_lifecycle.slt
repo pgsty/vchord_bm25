@@ -1,0 +1,115 @@
+# All statements in this file use the same backend. Errors must not poison its
+# resource owner or leave the index in use, including inside a subtransaction.
+statement ok
+CREATE TABLE scan_documents (id integer, vector tsvector);
+
+statement ok
+INSERT INTO scan_documents SELECT i, to_tsvector('simple', 'search term ' || i) FROM generate_series(1, 100) AS i;
+
+statement ok
+CREATE INDEX scan_documents_bm25 ON scan_documents USING bm25 (vector bm25_ops) WITH (limit = 10);
+
+statement ok
+SET enable_seqscan = off;
+
+statement ok
+SET bm25.prefilter = on;
+
+# Fail while the fetcher owns a heap tuple slot, before top-k materialization.
+statement error division by zero
+SELECT id FROM scan_documents WHERE 1 / (id - id) > 0
+ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'search'), 'scan_documents_bm25') LIMIT 10;
+
+statement ok
+REINDEX INDEX CONCURRENTLY scan_documents_bm25;
+
+statement ok
+BEGIN;
+
+statement ok
+SAVEPOINT scan_error;
+
+statement error division by zero
+SELECT id FROM scan_documents WHERE 1 / (id - id) > 0
+ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'search'), 'scan_documents_bm25') LIMIT 10;
+
+statement ok
+ROLLBACK TO SAVEPOINT scan_error;
+
+statement ok
+REINDEX INDEX scan_documents_bm25;
+
+statement ok
+COMMIT;
+
+statement ok
+CREATE FUNCTION slow_scan_filter(integer) RETURNS boolean LANGUAGE plpgsql VOLATILE AS $$
+BEGIN
+    PERFORM pg_sleep(1);
+    RETURN true;
+END
+$$;
+
+statement ok
+SET statement_timeout = '100ms';
+
+statement error canceling statement due to statement timeout
+SELECT id FROM scan_documents WHERE slow_scan_filter(id)
+ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'search'), 'scan_documents_bm25') LIMIT 10;
+
+statement ok
+RESET statement_timeout;
+
+statement ok
+REINDEX INDEX CONCURRENTLY scan_documents_bm25;
+
+statement ok
+SET bm25.prefilter = off;
+
+# Fail after the materialized scanner has yielded a row to the executor.
+statement error division by zero
+SELECT 1 / (id - id) FROM scan_documents
+ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'search'), 'scan_documents_bm25') LIMIT 1;
+
+statement ok
+REINDEX INDEX CONCURRENTLY scan_documents_bm25;
+
+# Roll back a cursor before its first fetch (pending scan state).
+statement ok
+BEGIN;
+
+statement ok
+DECLARE scan_cursor CURSOR FOR SELECT id FROM scan_documents
+ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'search'), 'scan_documents_bm25') LIMIT 10;
+
+statement ok
+ROLLBACK;
+
+query I
+SELECT count(*) FROM (SELECT id FROM scan_documents
+ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'search'), 'scan_documents_bm25') LIMIT 1) AS results;
+----
+1
+
+# Parameterized rescans must reset both pending data and materialized results.
+query I
+SELECT count(*) FROM (VALUES ('search'), ('term')) AS queries(term)
+CROSS JOIN LATERAL (SELECT id FROM scan_documents
+ORDER BY vector <&> to_bm25query(to_tsvector('simple', queries.term), 'scan_documents_bm25') LIMIT 3) AS results;
+----
+6
+
+statement ok
+DROP INDEX scan_documents_bm25;
+
+statement ok
+DROP TABLE scan_documents;
+
+statement ok
+DROP FUNCTION slow_scan_filter(integer);
+
+statement ok
+RESET bm25.prefilter;
+
+statement ok
+RESET enable_seqscan;
