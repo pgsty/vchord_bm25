@@ -132,11 +132,13 @@ pub unsafe extern "C-unwind" fn ambuild(
     let reporter = PostgresReporter {
         _phantom: PhantomData,
     };
-    reporter.tuples_total(unsafe { (*(*index_relation).rd_rel).reltuples as u64 });
+    // Start from the heap's estimate (-1 if never analyzed); the indexed count
+    // replaces it once the scan has finished.
+    reporter.tuples_total(unsafe { (*(*heap_relation).rd_rel).reltuples.max(0.0) as u64 });
     reporter.phase(BuildPhase::from_code(BuildPhaseCode::Scanning));
     let seed = bm25::seed::random();
     let tempdir = tempdir();
-    let total = if let Some(leader) = unsafe {
+    let (total, heap_tuples, index_tuples) = if let Some(leader) = unsafe {
         Bm25Leader::enter(
             c"bm25_parallel_build_main",
             heap_relation,
@@ -216,10 +218,12 @@ pub unsafe extern "C-unwind" fn ambuild(
                     );
                     order
                 },
-                || {
-                    // enter the barrier
+                |heap_tuples, index_tuples| {
+                    // enter the barrier, publishing this participant's counts
                     let shared = leader.bm25shared;
                     pgrx::pg_sys::SpinLockAcquire(&raw mut (*shared).mutex);
+                    (*shared).heap_tuples += heap_tuples;
+                    (*shared).index_tuples += index_tuples;
                     (*shared).barrier_enter_1 += 1;
                     pgrx::pg_sys::SpinLockRelease(&raw mut (*shared).mutex);
                     pgrx::pg_sys::ConditionVariableBroadcast(
@@ -279,12 +283,21 @@ pub unsafe extern "C-unwind" fn ambuild(
                     );
                 },
             );
-            leader.nparticipants as u32
+            // Every participant added its counts before entering barrier 1,
+            // which the leader has passed.
+            let (heap_tuples, index_tuples) = {
+                let shared = leader.bm25shared;
+                pgrx::pg_sys::SpinLockAcquire(&raw mut (*shared).mutex);
+                let counts = ((*shared).heap_tuples, (*shared).index_tuples);
+                pgrx::pg_sys::SpinLockRelease(&raw mut (*shared).mutex);
+                counts
+            };
+            (leader.nparticipants as u32, heap_tuples, index_tuples)
         }
     } else {
         unsafe {
             let indtuples = std::cell::Cell::new(0_u64);
-            build(
+            let (heap_tuples, index_tuples) = build(
                 index_relation,
                 heap_relation,
                 index_info,
@@ -300,10 +313,10 @@ pub unsafe extern "C-unwind" fn ambuild(
                     reporter.tuples_total(indtuples.get());
                 },
                 || 0,
-                || (),
+                |_, _| (),
                 || (),
             );
-            1
+            (1, heap_tuples, index_tuples)
         }
     };
     reporter.phase(BuildPhase::from_code(BuildPhaseCode::Writing));
@@ -312,7 +325,11 @@ pub unsafe extern "C-unwind" fn ambuild(
     bm25::build(bm25_options.index, &index, seed, segment, &|| {
         pgrx::pg_sys::check_for_interrupts!();
     });
-    unsafe { pgrx::pgbox::PgBox::<pgrx::pg_sys::IndexBuildResult>::alloc0().into_pg() }
+    // PostgreSQL stores these as `reltuples` of the table and of the index.
+    let mut result = unsafe { pgrx::pgbox::PgBox::<pgrx::pg_sys::IndexBuildResult>::alloc0() };
+    result.heap_tuples = heap_tuples;
+    result.index_tuples = index_tuples as f64;
+    result.into_pg()
 }
 
 #[repr(C)]
@@ -341,6 +358,10 @@ struct Bm25Shared {
     barrier_leave_1: bool,
     barrier_enter_2: i32,
     barrier_leave_2: bool,
+    /// heap tuples counted by the table AM, summed over participants
+    heap_tuples: f64,
+    /// records written (including NULL documents), summed over participants
+    index_tuples: u64,
 }
 
 fn is_mvcc_snapshot(snapshot: *mut pgrx::pg_sys::SnapshotData) -> bool {
@@ -373,25 +394,14 @@ impl Bm25Leader {
             heap_relation: pgrx::pg_sys::Relation,
             index_relation: pgrx::pg_sys::Relation,
         ) -> i32 {
+            // The planner already honours the `parallel_workers` reloption (an
+            // unset one is -1), max_parallel_maintenance_workers, the heap size
+            // and maintenance_work_mem; use its answer as is.
             unsafe {
-                if pgrx::pg_sys::plan_create_index_workers(
+                pgrx::pg_sys::plan_create_index_workers(
                     (*heap_relation).rd_id,
                     (*index_relation).rd_id,
-                ) == 0
-                {
-                    return 0;
-                }
-                if !(*heap_relation).rd_options.is_null() {
-                    let std_options = (*heap_relation)
-                        .rd_options
-                        .cast::<pgrx::pg_sys::StdRdOptions>();
-                    std::cmp::min(
-                        (*std_options).parallel_workers,
-                        pgrx::pg_sys::max_parallel_maintenance_workers,
-                    )
-                } else {
-                    pgrx::pg_sys::max_parallel_maintenance_workers
-                }
+                )
             }
         }
 
@@ -466,6 +476,8 @@ impl Bm25Leader {
                 barrier_leave_1: false,
                 barrier_enter_2: 0,
                 barrier_leave_2: false,
+                heap_tuples: 0.0,
+                index_tuples: 0,
             });
             pgrx::pg_sys::SpinLockInit(&raw mut (*bm25shared).mutex);
             pgrx::pg_sys::ConditionVariableInit(&raw mut (*bm25shared).condvar_barrier_enter_0);
@@ -592,7 +604,7 @@ pub unsafe extern "C-unwind" fn bm25_parallel_build_main(
     }
 
     unsafe {
-        build(
+        let _ = build(
             index_relation,
             heap_relation,
             index_info,
@@ -638,10 +650,12 @@ pub unsafe extern "C-unwind" fn bm25_parallel_build_main(
                 pgrx::pg_sys::ConditionVariableCancelSleep();
                 order
             },
-            || {
-                // enter the barrier
+            |heap_tuples, index_tuples| {
+                // enter the barrier, publishing this participant's counts
                 let shared = bm25shared;
                 pgrx::pg_sys::SpinLockAcquire(&raw mut (*shared).mutex);
+                (*shared).heap_tuples += heap_tuples;
+                (*shared).index_tuples += index_tuples;
                 (*shared).barrier_enter_1 += 1;
                 pgrx::pg_sys::SpinLockRelease(&raw mut (*shared).mutex);
                 pgrx::pg_sys::ConditionVariableBroadcast(
@@ -705,16 +719,19 @@ unsafe fn build(
     mut report_done: impl FnMut(),
     mut report_total: impl FnMut(),
     sync_0: impl FnOnce() -> u32,
-    sync_1: impl FnOnce(),
+    sync_1: impl FnOnce(f64, u64),
     sync_2: impl FnOnce(),
-) {
+) -> (f64, u64) {
     let order = sync_0();
     let mut records_writer = bm25::io::records_writer(path, order);
     let mut mappings_writer = bm25::io::mappings_writer(path, order);
 
     let traverser = unsafe { HeapTraverser::new(heap_relation, index_relation, index_info, scan) };
 
-    traverser.traverse(true, |tuple: &mut dyn crate::index::traverse::Tuple| {
+    // Every tuple passed to the callback (it matched the predicate, if any)
+    // becomes one record, NULL documents included.
+    let mut index_tuples = 0_u64;
+    let heap_tuples = traverser.traverse(true, |tuple: &mut dyn crate::index::traverse::Tuple| {
         let ctid = tuple.id();
         let (values, is_nulls) = tuple.build();
         let value = unsafe { (!is_nulls.add(0).read()).then_some(values.add(0).read()) };
@@ -738,10 +755,11 @@ unsafe fn build(
                 ctid_to_key(ctid),
             );
         }
+        index_tuples += 1;
         report_done();
     });
 
-    sync_1();
+    sync_1(heap_tuples, index_tuples);
 
     report_total();
 
@@ -754,6 +772,8 @@ unsafe fn build(
     });
 
     sync_2();
+
+    (heap_tuples, index_tuples)
 }
 
 #[pgrx::pg_guard]

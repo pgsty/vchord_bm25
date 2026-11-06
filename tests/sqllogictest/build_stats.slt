@@ -1,0 +1,173 @@
+# CREATE INDEX must report real statistics: PostgreSQL writes the returned
+# heap count into the table's reltuples and the record count into the index's.
+statement ok
+CREATE TABLE build_stats (id integer PRIMARY KEY, body tsvector);
+
+statement ok
+INSERT INTO build_stats
+SELECT i, CASE WHEN i % 10 = 0 THEN NULL ELSE to_tsvector('simple', 'document ' || i || ' search') END
+FROM generate_series(1, 20000) AS i;
+
+statement ok
+VACUUM (ANALYZE) build_stats;
+
+query I
+SELECT reltuples::bigint FROM pg_class WHERE relname = 'build_stats';
+----
+20000
+
+# Serial build.
+statement ok
+SET max_parallel_maintenance_workers = 0;
+
+statement ok
+CREATE INDEX build_stats_serial ON build_stats USING bm25 (body bm25_ops);
+
+query II
+SELECT (SELECT reltuples::bigint FROM pg_class WHERE relname = 'build_stats'),
+       (SELECT reltuples::bigint FROM pg_class WHERE relname = 'build_stats_serial');
+----
+20000 20000
+
+# NULL documents are stored as records, so they count in the index's
+# reltuples; corpus statistics still use non-NULL documents only.
+query I
+SELECT count(*) FROM build_stats WHERE body IS NULL;
+----
+2000
+
+statement ok
+DROP INDEX build_stats_serial;
+
+# Parallel build: the leader and every launched worker add their counts.
+statement ok
+SET max_parallel_maintenance_workers = 2;
+
+statement ok
+SET min_parallel_table_scan_size = 0;
+
+statement ok
+SET maintenance_work_mem = '256MB';
+
+statement ok
+CREATE INDEX build_stats_parallel ON build_stats USING bm25 (body bm25_ops);
+
+query II
+SELECT (SELECT reltuples::bigint FROM pg_class WHERE relname = 'build_stats'),
+       (SELECT reltuples::bigint FROM pg_class WHERE relname = 'build_stats_parallel');
+----
+20000 20000
+
+statement ok
+DROP INDEX build_stats_parallel;
+
+# Workers requested but none launched: the leader builds alone.
+statement ok
+SET max_parallel_workers = 0;
+
+statement ok
+CREATE INDEX build_stats_no_workers ON build_stats USING bm25 (body bm25_ops);
+
+query II
+SELECT (SELECT reltuples::bigint FROM pg_class WHERE relname = 'build_stats'),
+       (SELECT reltuples::bigint FROM pg_class WHERE relname = 'build_stats_no_workers');
+----
+20000 20000
+
+statement ok
+DROP INDEX build_stats_no_workers;
+
+# Fewer workers launched than requested.
+statement ok
+SET max_parallel_workers = 1;
+
+statement ok
+CREATE INDEX build_stats_one_worker ON build_stats USING bm25 (body bm25_ops);
+
+query II
+SELECT (SELECT reltuples::bigint FROM pg_class WHERE relname = 'build_stats'),
+       (SELECT reltuples::bigint FROM pg_class WHERE relname = 'build_stats_one_worker');
+----
+20000 20000
+
+statement ok
+DROP INDEX build_stats_one_worker;
+
+statement ok
+RESET max_parallel_workers;
+
+# Partial index: the index counts matching rows (NULL documents included),
+# the table keeps its full count.
+statement ok
+CREATE INDEX build_stats_partial ON build_stats USING bm25 (body bm25_ops) WHERE id % 4 = 0;
+
+query III
+SELECT (SELECT reltuples::bigint FROM pg_class WHERE relname = 'build_stats'),
+       (SELECT reltuples::bigint FROM pg_class WHERE relname = 'build_stats_partial'),
+       (SELECT count(*) FROM build_stats WHERE id % 4 = 0);
+----
+20000 5000 5000
+
+statement ok
+DROP INDEX build_stats_partial;
+
+statement ok
+SET max_parallel_maintenance_workers = 0;
+
+statement ok
+CREATE INDEX build_stats_partial ON build_stats USING bm25 (body bm25_ops) WHERE id % 4 = 0;
+
+query II
+SELECT (SELECT reltuples::bigint FROM pg_class WHERE relname = 'build_stats'),
+       (SELECT reltuples::bigint FROM pg_class WHERE relname = 'build_stats_partial');
+----
+20000 5000
+
+statement ok
+DROP INDEX build_stats_partial;
+
+# A table reloption other than parallel_workers (here fillfactor) must not
+# turn off parallel builds; statistics stay correct either way.
+statement ok
+ALTER TABLE build_stats SET (fillfactor = 90);
+
+statement ok
+SET max_parallel_maintenance_workers = 2;
+
+statement ok
+CREATE INDEX build_stats_fillfactor ON build_stats USING bm25 (body bm25_ops);
+
+query II
+SELECT (SELECT reltuples::bigint FROM pg_class WHERE relname = 'build_stats'),
+       (SELECT reltuples::bigint FROM pg_class WHERE relname = 'build_stats_fillfactor');
+----
+20000 20000
+
+# The rebuilt index still ranks and keeps NULL documents last.
+query II
+SELECT id, (body IS NULL)::int FROM build_stats
+ORDER BY body <&> to_bm25query(to_tsvector('simple', 'document 7'), 'build_stats_fillfactor'), id
+LIMIT 1;
+----
+7 0
+
+statement ok
+REINDEX INDEX build_stats_fillfactor;
+
+query II
+SELECT (SELECT reltuples::bigint FROM pg_class WHERE relname = 'build_stats'),
+       (SELECT reltuples::bigint FROM pg_class WHERE relname = 'build_stats_fillfactor');
+----
+20000 20000
+
+statement ok
+RESET max_parallel_maintenance_workers;
+
+statement ok
+RESET min_parallel_table_scan_size;
+
+statement ok
+RESET maintenance_work_mem;
+
+statement ok
+DROP TABLE build_stats;

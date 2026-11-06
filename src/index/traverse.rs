@@ -24,7 +24,9 @@ impl<F: FnMut(&mut dyn Tuple)> Traverse for F {
 }
 
 pub trait Traverser {
-    fn traverse<T: Traverse>(&self, progress: bool, traverse: T);
+    /// Returns the number of heap tuples counted by the table AM, which is
+    /// what `IndexBuildResult::heap_tuples` expects.
+    fn traverse<T: Traverse>(&self, progress: bool, traverse: T) -> f64;
 }
 
 #[derive(Debug, Clone)]
@@ -56,7 +58,7 @@ impl Drop for HeapTraverser {
 }
 
 impl Traverser for HeapTraverser {
-    fn traverse<T: Traverse>(&self, progress: bool, mut traverse: T) {
+    fn traverse<T: Traverse>(&self, progress: bool, mut traverse: T) -> f64 {
         unsafe {
             use pgrx::pg_sys::ffi::pg_guard_ffi_boundary;
             let table_am = (*self.heap_relation).rd_tableam;
@@ -81,7 +83,7 @@ impl Traverser for HeapTraverser {
                     (&raw mut traverse).cast(),
                     self.scan,
                 )
-            });
+            })
         }
     }
 }
