@@ -165,6 +165,23 @@ pub fn _bm25_evaluate(lhs: TsVectorInput, rhs: pgrx::composite_type!("bm25query"
         );
     }
     let relation = Index::open(index, pg_sys::AccessShareLock as _);
+    // Check permissions and validity before reading any index page. An index
+    // left by a failed CREATE INDEX CONCURRENTLY may have no metapage, or
+    // incomplete corpus statistics.
+    crate::index::query::authorize(relation.oid());
+    if !relation.is_valid() {
+        pg_sys::panic::ErrorReport::new(
+            pgrx::PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            format!(
+                "index \"{}\" is not valid",
+                pg_class.relname.to_string_lossy()
+            ),
+            "_bm25_evaluate",
+        )
+        .set_hint("REINDEX the index or drop it.")
+        .report(pg_sys::elog::PgLogLevel::ERROR);
+        unreachable!();
+    }
     let index = unsafe { PostgresRelation::new(relation.raw()) };
     let seed = bm25::seed::seed(&index);
     let lhs = cast_tsvector_to_document(&seed, lhs.as_borrowed());
@@ -189,6 +206,9 @@ impl Index {
     }
     fn raw(&self) -> *mut pg_sys::RelationData {
         self.raw
+    }
+    fn is_valid(&self) -> bool {
+        unsafe { (*(*self.raw).rd_index).indisvalid }
     }
 }
 

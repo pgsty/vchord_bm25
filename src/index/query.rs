@@ -68,11 +68,9 @@ pub fn enter(desc: *mut pg_sys::QueryDesc) -> Active {
     Active(ACTIVE.with_borrow_mut(|a| std::mem::replace(a, current)))
 }
 
-pub fn prepare(
-    index: &PostgresRelation<bm25::Opaque>,
-    oid: Oid,
-    query: &Query,
-) -> Rc<bm25::Prepared> {
+/// Checks that the current role may read the index's corpus statistics, once
+/// per execution, index and role.
+pub fn authorize(oid: Oid) {
     let role = unsafe { pg_sys::GetUserId() };
     let active = ACTIVE.with_borrow(Clone::clone);
     // Record a role only after its check passed: an error caught by a
@@ -85,6 +83,15 @@ pub fn prepare(
         }
         None => crate::index::operators::check_index_permissions(oid),
     }
+}
+
+pub fn prepare(
+    index: &PostgresRelation<bm25::Opaque>,
+    oid: Oid,
+    query: &Query,
+) -> Rc<bm25::Prepared> {
+    authorize(oid);
+    let active = ACTIVE.with_borrow(Clone::clone);
     let key = (oid, query.clone());
     if let Some(cache) = &active {
         if let Some(prepared) = cache.entries.borrow_mut().get(&key) {
