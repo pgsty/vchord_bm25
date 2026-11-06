@@ -1,0 +1,107 @@
+# Statistics shared within one execution. Every query below has 20 terms, so
+# each prepared entry is larger than work_mem = 64kB on its own.
+statement ok
+CREATE TABLE stats_cache (id integer PRIMARY KEY, body tsvector);
+
+statement ok
+INSERT INTO stats_cache
+SELECT i, to_tsvector('simple', 'common w' || (i % 13) || ' a' || (i % 19) || ' filler' || i)
+FROM generate_series(1, 300) AS i;
+
+statement ok
+CREATE INDEX stats_cache_bm25 ON stats_cache USING bm25 (body bm25_ops);
+
+statement ok
+SET work_mem = '64kB';
+
+statement ok
+SET enable_seqscan = off;
+
+# Inserts into the indexed table once, from inside the statement under test.
+statement ok
+CREATE FUNCTION stats_cache_bump() RETURNS integer VOLATILE LANGUAGE sql AS $$
+INSERT INTO stats_cache
+SELECT i, to_tsvector('simple', 'common w7 filler' || i) FROM generate_series(100001, 100500) AS i
+WHERE NOT EXISTS (SELECT 1 FROM stats_cache WHERE id = 100001);
+SELECT 1;
+$$;
+
+statement ok
+CREATE FUNCTION stats_cache_plan(query text) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE line text; result text := '';
+BEGIN
+    FOR line IN EXECUTE 'EXPLAIN (COSTS OFF) ' || query LOOP
+        result := result || line || E'\n';
+    END LOOP;
+    RETURN result;
+END
+$$;
+
+# Reference scores before the corpus changes.
+statement ok
+CREATE TABLE stats_cache_ref AS
+SELECT id, body <&> to_bm25query(to_tsvector('simple', 'common w7 w8 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18'), 'stats_cache_bm25') AS s FROM stats_cache;
+
+query I
+SELECT (stats_cache_plan($q$
+SELECT id FROM stats_cache ORDER BY body <&> to_bm25query(to_tsvector('simple', 'common w7 w8 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18'), 'stats_cache_bm25') LIMIT 20
+$q$) LIKE '%Index Scan using stats_cache_bm25%')::int;
+----
+1
+
+# A native scan holds its statistics for the whole execution. Scalar scoring
+# of the same query must reuse them even after more than eight other queries
+# (and the scan's query is then not among the most recent ones) and after
+# the corpus changed during the statement; otherwise the displayed scores
+# would be computed from different statistics than the scan's order.
+statement ok
+CREATE TABLE stats_cache_got AS
+SELECT id,
+       body <&> to_bm25query(to_tsvector('simple', 'common w7 w8 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18'), 'stats_cache_bm25') AS s1,
+       body <&> to_bm25query(to_tsvector('simple', 'q2t1 q2t2 q2t3 q2t4 q2t5 q2t6 q2t7 q2t8 q2t9 q2t10 q2t11 q2t12 q2t13 q2t14 q2t15 q2t16 q2t17 q2t18 q2t19 q2t20'), 'stats_cache_bm25') AS s2,
+       body <&> to_bm25query(to_tsvector('simple', 'q3t1 q3t2 q3t3 q3t4 q3t5 q3t6 q3t7 q3t8 q3t9 q3t10 q3t11 q3t12 q3t13 q3t14 q3t15 q3t16 q3t17 q3t18 q3t19 q3t20'), 'stats_cache_bm25') AS s3,
+       body <&> to_bm25query(to_tsvector('simple', 'q4t1 q4t2 q4t3 q4t4 q4t5 q4t6 q4t7 q4t8 q4t9 q4t10 q4t11 q4t12 q4t13 q4t14 q4t15 q4t16 q4t17 q4t18 q4t19 q4t20'), 'stats_cache_bm25') AS s4,
+       body <&> to_bm25query(to_tsvector('simple', 'q5t1 q5t2 q5t3 q5t4 q5t5 q5t6 q5t7 q5t8 q5t9 q5t10 q5t11 q5t12 q5t13 q5t14 q5t15 q5t16 q5t17 q5t18 q5t19 q5t20'), 'stats_cache_bm25') AS s5,
+       body <&> to_bm25query(to_tsvector('simple', 'q6t1 q6t2 q6t3 q6t4 q6t5 q6t6 q6t7 q6t8 q6t9 q6t10 q6t11 q6t12 q6t13 q6t14 q6t15 q6t16 q6t17 q6t18 q6t19 q6t20'), 'stats_cache_bm25') AS s6,
+       body <&> to_bm25query(to_tsvector('simple', 'q7t1 q7t2 q7t3 q7t4 q7t5 q7t6 q7t7 q7t8 q7t9 q7t10 q7t11 q7t12 q7t13 q7t14 q7t15 q7t16 q7t17 q7t18 q7t19 q7t20'), 'stats_cache_bm25') AS s7,
+       body <&> to_bm25query(to_tsvector('simple', 'q8t1 q8t2 q8t3 q8t4 q8t5 q8t6 q8t7 q8t8 q8t9 q8t10 q8t11 q8t12 q8t13 q8t14 q8t15 q8t16 q8t17 q8t18 q8t19 q8t20'), 'stats_cache_bm25') AS s8,
+       body <&> to_bm25query(to_tsvector('simple', 'q9t1 q9t2 q9t3 q9t4 q9t5 q9t6 q9t7 q9t8 q9t9 q9t10 q9t11 q9t12 q9t13 q9t14 q9t15 q9t16 q9t17 q9t18 q9t19 q9t20'), 'stats_cache_bm25') AS s9,
+       body <&> to_bm25query(to_tsvector('simple', 'q10t1 q10t2 q10t3 q10t4 q10t5 q10t6 q10t7 q10t8 q10t9 q10t10 q10t11 q10t12 q10t13 q10t14 q10t15 q10t16 q10t17 q10t18 q10t19 q10t20'), 'stats_cache_bm25') AS s10,
+       stats_cache_bump() AS bump
+FROM stats_cache
+ORDER BY body <&> to_bm25query(to_tsvector('simple', 'common w7 w8 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18'), 'stats_cache_bm25')
+LIMIT 20;
+
+query II
+SELECT count(*), count(*) FILTER (WHERE g.s1 IS NOT DISTINCT FROM r.s)
+FROM stats_cache_got AS g JOIN stats_cache_ref AS r USING (id);
+----
+20 20
+
+# The corpus did change: a new execution sees different statistics.
+query I
+SELECT count(*) FROM stats_cache WHERE id > 100000;
+----
+500
+
+query I
+SELECT count(*) FROM stats_cache_ref AS r JOIN stats_cache AS d USING (id)
+WHERE r.id IN (SELECT id FROM stats_cache_got)
+  AND (d.body <&> to_bm25query(to_tsvector('simple', 'common w7 w8 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18'), 'stats_cache_bm25')) IS DISTINCT FROM r.s;
+----
+20
+
+statement ok
+RESET enable_seqscan;
+
+statement ok
+RESET work_mem;
+
+statement ok
+DROP FUNCTION stats_cache_bump();
+
+statement ok
+DROP FUNCTION stats_cache_plan(text);
+
+statement ok
+DROP TABLE stats_cache, stats_cache_ref, stats_cache_got;

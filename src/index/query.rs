@@ -8,42 +8,32 @@
 
 use crate::index::storage::PostgresRelation;
 use bm25::vector::Query;
+use index::lru::Lru;
 use pgrx::pg_sys::{self, Oid};
-use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 // Statistics do not depend on the role; permission checks do.
 type Key = (Oid, Query);
 #[derive(Default)]
 struct Cache {
-    entries: RefCell<HashMap<Key, Rc<bm25::Prepared>>>,
-    order: RefCell<VecDeque<Key>>,
-    bytes: Cell<usize>,
+    entries: RefCell<Lru<Key, bm25::Prepared>>,
     checked: RefCell<HashSet<(Oid, Oid)>>,
 }
 
 impl Cache {
     // Rust memory is outside PostgreSQL's accounting: bound it by work_mem,
-    // evicting the oldest query. An evicted query is prepared again on its
-    // next use; a scan still holding it keeps its own reference.
+    // softly. Hits refresh an entry; statistics still held by a scan and the
+    // most recently used queries are never evicted, so a scan and scalar
+    // scoring of the same query share one preparation. Other queries are
+    // evicted least recently used first and prepared again on their next use.
     fn insert(&self, key: Key, prepared: Rc<bm25::Prepared>) {
         let budget = (unsafe { pg_sys::work_mem } as usize).saturating_mul(1024);
         let size = prepared.approximate_size();
-        let mut entries = self.entries.borrow_mut();
-        let mut order = self.order.borrow_mut();
-        while self.bytes.get() + size > budget {
-            let Some(old) = order.pop_front() else {
-                break;
-            };
-            if let Some(evicted) = entries.remove(&old) {
-                self.bytes
-                    .set(self.bytes.get() - evicted.approximate_size());
-            }
-        }
-        self.bytes.set(self.bytes.get() + size);
-        order.push_back(key.clone());
-        entries.insert(key, prepared);
+        self.entries
+            .borrow_mut()
+            .insert(key, prepared, size, budget);
     }
 }
 
@@ -97,8 +87,8 @@ pub fn prepare(
     }
     let key = (oid, query.clone());
     if let Some(cache) = &active {
-        if let Some(prepared) = cache.entries.borrow().get(&key) {
-            return prepared.clone();
+        if let Some(prepared) = cache.entries.borrow_mut().get(&key) {
+            return prepared;
         }
     }
     let prepared = Rc::new(bm25::Prepared::collect(

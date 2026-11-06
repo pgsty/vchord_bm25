@@ -6,5 +6,6 @@
 // Copyright (c) 2026 PGSTY PTE. LTD.
 // Maintained by Ruohang Feng @ PGSTY (rh@vonng.com)
 
+pub mod lru;
 pub mod relation;
 pub mod tuples;
