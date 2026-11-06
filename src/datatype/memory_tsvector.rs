@@ -6,7 +6,7 @@
 // Copyright (c) 2026 PGSTY PTE. LTD.
 // Maintained by Ruohang Feng @ PGSTY (rh@vonng.com)
 
-use crate::datatype::tsvector::TsVectorBorrowed;
+use crate::datatype::tsvector::{TsVectorBorrowed, layout, malformed};
 use pgrx::datum::{FromDatum, IntoDatum};
 use pgrx::pg_sys::{Datum, Oid};
 use pgrx::pgrx_sql_entity_graph::metadata::*;
@@ -21,21 +21,28 @@ pub struct TsVectorHeader {
 }
 
 impl TsVectorHeader {
+    /// `this` must point to a detoasted tsvector (4-byte varlena header).
     unsafe fn as_borrowed<'a>(this: NonNull<Self>) -> TsVectorBorrowed<'a> {
         unsafe {
             let this = this.as_ptr();
-            let size = (cfg_select! {
+            let varsize = cfg_select! {
                 target_endian = "little" => {
                     ((*this).varlena >> 2) & 0x3FFFFFFF
                 }
                 target_endian = "big" => {
                     (*this).varlena & 0x3FFFFFFF
                 }
-            } as usize)
-                .strict_sub(size_of::<u32>());
+            } as usize;
+            // Validate the header before reading the entry count, and the
+            // entry array before building any slice.
+            if varsize < size_of::<TsVectorHeader>() {
+                malformed("the datum is smaller than the tsvector header");
+            }
             let len = (*this).len as usize;
-            let size_0 = size_of::<u32>().strict_mul(len);
-            let size_1 = size.strict_sub(size_0);
+            let size_1 = match layout(varsize, len) {
+                Ok(size_1) => size_1,
+                Err(reason) => malformed(reason),
+            };
             let ptr_0 = (*this).entries.as_ptr();
             let ptr_1 = ptr_0.add(len).cast::<u8>();
             let entries = std::slice::from_raw_parts(ptr_0, len);
@@ -44,6 +51,9 @@ impl TsVectorHeader {
         }
     }
 }
+
+// `layout` assumes the C struct's 8-byte header (DATAHDRSIZE).
+const _: () = assert!(size_of::<TsVectorHeader>() == 8);
 
 pub struct TsVectorInput<'a>(NonNull<TsVectorHeader>, PhantomData<&'a ()>, bool);
 

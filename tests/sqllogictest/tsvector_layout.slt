@@ -1,0 +1,125 @@
+# Real tsvector layouts: empty vectors, stripped vectors, odd-length and
+# 2046-byte lexemes, lexemes stored more than 64 KiB into the data area,
+# position counts up to 256 and positions up to 16383.
+statement ok
+CREATE TABLE tsv_layout (id integer PRIMARY KEY, body tsvector);
+
+statement ok
+INSERT INTO tsv_layout VALUES
+    (1, ''),
+    (2, 'a:1'),
+    (3, ((SELECT string_agg(lpad(i::text, 2046, 'x') || CASE WHEN i % 2 = 0 THEN ':1' ELSE ':1,2' END, ' ')
+          FROM generate_series(1, 40) AS i) || ' zzneedle:1,2,3')::tsvector),
+    (4, 'tf:1,2,3,4 pad:5'),
+    (5, 'tf:1 pad:2,3,4,5'),
+    (6, ('many:' || (SELECT string_agg(i::text, ',') FROM generate_series(1, 256) AS i))::tsvector),
+    (7, 'many:1 other:2'),
+    (8, 'edge:16383 abc:1 de:2,3');
+
+# The needle really lies beyond 64 KiB of lexeme data (WordEntry.pos > 65535);
+# concatenation yields an uncompressed in-memory datum.
+query II
+SELECT length(body), (pg_column_size(body || ''::tsvector) > 81920)::int FROM tsv_layout WHERE id = 3;
+----
+41 1
+
+query I
+SELECT length(body) FROM tsv_layout WHERE id = 6;
+----
+1
+
+statement ok
+CREATE INDEX tsv_layout_bm25 ON tsv_layout USING bm25 (body bm25_ops);
+
+# Scalar scoring decodes each lexeme.
+query IIIIIIII
+SELECT
+    (SELECT (body <&> to_bm25query('zzneedle'::tsvector, 'tsv_layout_bm25') < 0)::int FROM tsv_layout WHERE id = 3),
+    (SELECT (body <&> to_bm25query(lpad('7', 2046, 'x')::tsvector, 'tsv_layout_bm25') < 0)::int FROM tsv_layout WHERE id = 3),
+    (SELECT (body <&> to_bm25query('a'::tsvector, 'tsv_layout_bm25') < 0)::int FROM tsv_layout WHERE id = 2),
+    (SELECT (body <&> to_bm25query('a zzneedle'::tsvector, 'tsv_layout_bm25') = 0)::int FROM tsv_layout WHERE id = 1),
+    (SELECT (body <&> to_bm25query('edge'::tsvector, 'tsv_layout_bm25') < 0)::int FROM tsv_layout WHERE id = 8),
+    (SELECT (body <&> to_bm25query('abc de'::tsvector, 'tsv_layout_bm25') < 0)::int FROM tsv_layout WHERE id = 8),
+    (SELECT (body <&> to_bm25query(''::tsvector, 'tsv_layout_bm25') = 0)::int FROM tsv_layout WHERE id = 8),
+    (SELECT count(*) FROM tsv_layout WHERE body <&> to_bm25query(strip('zzneedle:1'::tsvector), 'tsv_layout_bm25') < 0);
+----
+1 1 1 1 1 1 1 1
+
+# Position counts are term frequencies: same document length, tf 4 vs 1, and
+# 256 positions vs 1.
+query II
+SELECT
+    ((SELECT body <&> to_bm25query('tf'::tsvector, 'tsv_layout_bm25') FROM tsv_layout WHERE id = 4)
+   < (SELECT body <&> to_bm25query('tf'::tsvector, 'tsv_layout_bm25') FROM tsv_layout WHERE id = 5))::int,
+    ((SELECT body <&> to_bm25query('many'::tsvector, 'tsv_layout_bm25') FROM tsv_layout WHERE id = 6)
+   < (SELECT body <&> to_bm25query('many'::tsvector, 'tsv_layout_bm25') FROM tsv_layout WHERE id = 7))::int;
+----
+1 1
+
+# Native scans read the same lexemes from the index.
+statement ok
+SET enable_seqscan = off;
+
+query I
+SELECT id FROM tsv_layout ORDER BY body <&> to_bm25query('zzneedle'::tsvector, 'tsv_layout_bm25') LIMIT 1;
+----
+3
+
+query I
+SELECT id FROM tsv_layout ORDER BY body <&> to_bm25query(lpad('40', 2046, 'x')::tsvector, 'tsv_layout_bm25') LIMIT 1;
+----
+3
+
+query I
+SELECT id FROM tsv_layout ORDER BY body <&> to_bm25query('tf'::tsvector, 'tsv_layout_bm25') LIMIT 1;
+----
+4
+
+query I
+SELECT id FROM tsv_layout ORDER BY body <&> to_bm25query('many'::tsvector, 'tsv_layout_bm25') LIMIT 1;
+----
+6
+
+query I
+SELECT count(*) FROM (
+    SELECT id FROM tsv_layout ORDER BY body <&> to_bm25query('edge a'::tsvector, 'tsv_layout_bm25')
+) AS ranked;
+----
+8
+
+# Inserted documents go through the same decoding.
+statement ok
+INSERT INTO tsv_layout VALUES (9, ('zzneedle:1,2,3,4,5 ' || lpad('1', 2046, 'x') || ':1')::tsvector);
+
+query I
+SELECT id FROM tsv_layout ORDER BY body <&> to_bm25query('zzneedle'::tsvector, 'tsv_layout_bm25') LIMIT 1;
+----
+9
+
+statement ok
+RESET enable_seqscan;
+
+# Documents without positions are rejected, as before.
+statement error tsvector must have positions
+INSERT INTO tsv_layout VALUES (10, strip('word:1,2'::tsvector));
+
+statement error tsvector must have positions
+INSERT INTO tsv_layout VALUES (10, array_to_tsvector(ARRAY['word']));
+
+statement error tsvector must have positions
+SELECT strip(body) <&> to_bm25query('a'::tsvector, 'tsv_layout_bm25') FROM tsv_layout WHERE id = 2;
+
+statement ok
+DROP INDEX tsv_layout_bm25;
+
+statement ok
+CREATE TABLE tsv_layout_stripped (body tsvector);
+
+statement ok
+INSERT INTO tsv_layout_stripped VALUES ('word:1'), (strip('word:1'::tsvector));
+
+statement error tsvector must have positions
+CREATE INDEX tsv_layout_stripped_bm25 ON tsv_layout_stripped USING bm25 (body bm25_ops);
+
+statement ok
+DROP TABLE tsv_layout, tsv_layout_stripped;
