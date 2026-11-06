@@ -66,6 +66,50 @@ fn class_info(reloid: Oid) -> Option<ClassInfo> {
     Some(info)
 }
 
+fn type_name(typid: Oid) -> Option<CString> {
+    let tuple = unsafe {
+        pg_sys::SearchSysCache1(
+            pg_sys::SysCacheIdentifier::TYPEOID as _,
+            typid.into_datum()?,
+        )
+    };
+    if tuple.is_null() {
+        return None;
+    }
+    let name = unsafe {
+        let typ = heap_tuple_struct::<pg_sys::FormData_pg_type>(tuple);
+        CStr::from_ptr((*typ).typname.data.as_ptr()).to_owned()
+    };
+    unsafe { pg_sys::ReleaseSysCache(tuple) };
+    Some(name)
+}
+
+/// Whether `funcid` is this extension's `to_bm25query(tsvector, regclass)`
+/// returning its `bm25query`, in whatever schema the extension lives. A
+/// function of the same name elsewhere may return a different index.
+pub(crate) fn is_bm25query_constructor(funcid: Oid) -> bool {
+    unsafe {
+        let name = pg_sys::get_func_name(funcid);
+        if name.is_null() || CStr::from_ptr(name) != c"to_bm25query" {
+            return false;
+        }
+        let mut argtypes = std::ptr::null_mut::<Oid>();
+        let mut nargs = 0;
+        let rettype = pg_sys::get_func_signature(funcid, &mut argtypes, &mut nargs);
+        if nargs != 2
+            || *argtypes.add(0) != pg_sys::TSVECTOROID
+            || *argtypes.add(1) != pg_sys::REGCLASSOID
+        {
+            return false;
+        }
+        let extension = pg_sys::get_extension_oid(c"vchord_bm25".as_ptr(), true);
+        extension != pg_sys::InvalidOid
+            && pg_sys::getExtensionOfObject(pg_sys::ProcedureRelationId, funcid) == extension
+            && pg_sys::getExtensionOfObject(pg_sys::TypeRelationId, rettype) == extension
+            && type_name(rettype).as_deref() == Some(c"bm25query")
+    }
+}
+
 // Both scalar scoring and native scans read statistics for the entire index.
 // Query preparation checks the current role once per execution/query key;
 // a later execution or a different role must perform its own permission check.

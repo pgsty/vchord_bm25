@@ -1,0 +1,139 @@
+# The planner trusts the target index of to_bm25query(vector, index) only for
+# the extension's own constructor, wherever the extension's schema is.
+# Constant arguments are folded into a bm25query constant at plan time, so a
+# parameterized query vector (generic plan) keeps the function call.
+statement ok
+CREATE TABLE ctor_docs (id integer PRIMARY KEY, body tsvector);
+
+statement ok
+INSERT INTO ctor_docs SELECT i, to_tsvector('simple', 'term ' || i) FROM generate_series(1, 2000) AS i;
+
+statement ok
+CREATE INDEX ctor_a ON ctor_docs USING bm25 (body bm25_ops);
+
+statement ok
+CREATE INDEX ctor_b ON ctor_docs USING bm25 (body bm25_ops);
+
+statement ok
+VACUUM (ANALYZE) ctor_docs;
+
+statement ok
+CREATE FUNCTION ctor_plan(query text) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE line text; result text := '';
+BEGIN
+    FOR line IN EXECUTE 'EXPLAIN (COSTS OFF) ' || query LOOP
+        result := result || line || E'\n';
+    END LOOP;
+    RETURN result;
+END
+$$;
+
+statement ok
+CREATE FUNCTION ctor_count(query text) RETURNS integer LANGUAGE plpgsql AS $$
+DECLARE seen integer := 0; r record;
+BEGIN
+    FOR r IN EXECUTE query LOOP
+        seen := seen + 1;
+    END LOOP;
+    RETURN seen;
+END
+$$;
+
+statement ok
+SET plan_cache_mode = force_generic_plan;
+
+statement ok
+PREPARE ctor_real(text) AS
+SELECT id FROM ctor_docs ORDER BY body <&> to_bm25query(to_tsvector('simple', $1), 'ctor_a') LIMIT 5;
+
+query I
+SELECT (ctor_plan($q$EXECUTE ctor_real('term')$q$) LIKE '%Index Scan using ctor_a %')::int;
+----
+1
+
+query I
+SELECT ctor_count($q$EXECUTE ctor_real('term')$q$);
+----
+5
+
+statement ok
+DEALLOCATE ctor_real;
+
+# A same-name function in another schema that returns a different index.
+statement ok
+CREATE SCHEMA ctor_forge;
+
+statement ok
+CREATE FUNCTION ctor_forge.to_bm25query(tsvector, regclass) RETURNS bm25query
+IMMUTABLE STRICT LANGUAGE sql AS $$ SELECT ROW($1, 'ctor_b'::regclass)::bm25query $$;
+
+statement ok
+SET search_path = ctor_forge, public;
+
+statement ok
+PREPARE ctor_forged(text) AS
+SELECT id FROM ctor_docs ORDER BY body <&> to_bm25query(to_tsvector('simple', $1), 'ctor_a') LIMIT 5;
+
+query I
+SELECT (ctor_plan($q$EXECUTE ctor_forged('term')$q$) NOT LIKE '%Index Scan using ctor_a %')::int;
+----
+1
+
+# Previously the planner chose ctor_a and the scan failed with "expected
+# index ..., but got index ..."; now the query falls back to scalar scoring.
+query I
+SELECT ctor_count($q$EXECUTE ctor_forged('term')$q$);
+----
+5
+
+statement ok
+DEALLOCATE ctor_forged;
+
+statement ok
+RESET search_path;
+
+statement ok
+DROP SCHEMA ctor_forge CASCADE;
+
+# The real constructor is still recognized after the extension moves.
+statement ok
+CREATE SCHEMA ctor_moved;
+
+statement ok
+ALTER EXTENSION vchord_bm25 SET SCHEMA ctor_moved;
+
+statement ok
+SET search_path = public, ctor_moved;
+
+statement ok
+PREPARE ctor_relocated(text) AS
+SELECT id FROM ctor_docs ORDER BY body <&> ctor_moved.to_bm25query(to_tsvector('simple', $1), 'ctor_a') LIMIT 5;
+
+query I
+SELECT (ctor_plan($q$EXECUTE ctor_relocated('term')$q$) LIKE '%Index Scan using ctor_a %')::int;
+----
+1
+
+statement ok
+DEALLOCATE ctor_relocated;
+
+statement ok
+RESET search_path;
+
+statement ok
+ALTER EXTENSION vchord_bm25 SET SCHEMA public;
+
+statement ok
+DROP SCHEMA ctor_moved;
+
+statement ok
+RESET plan_cache_mode;
+
+statement ok
+DROP FUNCTION ctor_plan(text);
+
+statement ok
+DROP FUNCTION ctor_count(text);
+
+statement ok
+DROP TABLE ctor_docs;

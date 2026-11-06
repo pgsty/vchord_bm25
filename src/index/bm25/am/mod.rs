@@ -302,13 +302,12 @@ pub unsafe extern "C-unwind" fn amcostestimate(
                     }
                     pgrx::pg_sys::NodeTag::T_FuncExpr => {
                         // to_bm25query() is STRICT around ROW(), so PostgreSQL
-                        // does not inline it; accept a constant target index.
+                        // does not inline it; accept a constant target index,
+                        // but only for this extension's own constructor.
                         let func = &*rhs.cast::<pgrx::pg_sys::FuncExpr>();
-                        let name = pgrx::pg_sys::get_func_name(func.funcid);
-                        if !name.is_null()
-                            && CStr::from_ptr(name) == c"to_bm25query"
-                            && !func.args.is_null()
+                        if !func.args.is_null()
                             && (*func.args).length == 2
+                            && crate::index::operators::is_bm25query_constructor(func.funcid)
                         {
                             let target =
                                 pgrx::pg_sys::list_nth(func.args, 1).cast::<pgrx::pg_sys::Const>();
