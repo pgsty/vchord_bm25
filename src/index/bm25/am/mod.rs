@@ -535,9 +535,14 @@ pub unsafe extern "C-unwind" fn amgettuple(
         };
         scanner.prefilter = options.prefilter;
         if let Some(hack) = scanner.hack {
-            // Volatile predicates must run only in PostgreSQL's executor.
+            // Volatile predicates and SubPlans must run only in PostgreSQL's
+            // executor, which evaluates the qual again: the volatility walker
+            // does not look into a SubPlan's plan, and evaluating a SubPlan
+            // twice duplicates its side effects and random choices.
+            let qual = unsafe { (*(*hack.as_ptr()).ss.ps.plan).qual.cast() };
             if unsafe {
-                pgrx::pg_sys::contain_volatile_functions((*(*hack.as_ptr()).ss.ps.plan).qual.cast())
+                pgrx::pg_sys::contain_volatile_functions(qual)
+                    || pgrx::pg_sys::contain_subplans(qual)
             } {
                 scanner.prefilter = false;
             }
