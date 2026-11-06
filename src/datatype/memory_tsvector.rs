@@ -17,7 +17,7 @@ use std::ptr::NonNull;
 pub struct TsVectorHeader {
     varlena: u32,
     len: u32,
-    entries: [u32; 0],
+    entries: [pgrx::pg_sys::WordEntry; 0],
 }
 
 impl TsVectorHeader {

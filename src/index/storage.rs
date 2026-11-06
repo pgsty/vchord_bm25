@@ -75,7 +75,7 @@ impl<O: Opaque> Page for PostgresPage<O> {
         let iid = unsafe { self.header.pd_linp.as_ptr().add((i - 1) as _).read() };
         let lp_off = iid.lp_off() as usize;
         let lp_len = iid.lp_len() as usize;
-        match lp_flags(iid) {
+        match iid.lp_flags() {
             pgrx::pg_sys::LP_UNUSED => return None,
             pgrx::pg_sys::LP_NORMAL => (),
             pgrx::pg_sys::LP_REDIRECT => unimplemented!(),
@@ -106,7 +106,7 @@ impl<O: Opaque> Page for PostgresPage<O> {
         let iid = unsafe { self.header.pd_linp.as_ptr().add((i - 1) as _).read() };
         let lp_off = iid.lp_off() as usize;
         let lp_len = iid.lp_len() as usize;
-        match lp_flags(iid) {
+        match iid.lp_flags() {
             pgrx::pg_sys::LP_UNUSED => return None,
             pgrx::pg_sys::LP_NORMAL => (),
             pgrx::pg_sys::LP_REDIRECT => unimplemented!(),
@@ -479,12 +479,6 @@ impl<O: Opaque> RelationPrefetch for PostgresRelation<O> {
     }
 }
 
-#[inline(always)]
-fn lp_flags(x: pgrx::pg_sys::ItemIdData) -> u32 {
-    let x: u32 = unsafe { std::mem::transmute(x) };
-    (x >> 15) & 0b11
-}
-
 // Emulate unstable library feature `box_vec_non_null`.
 // See https://github.com/rust-lang/rust/issues/130364.
 
@@ -509,5 +503,72 @@ pub fn reader() -> bm25::Reader<'static> {
     bm25::Reader {
         in_recovery: unsafe { pgrx::pg_sys::RecoveryInProgress() },
         conflict: &conflict,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pgrx::pg_sys::{ItemIdData, LP_DEAD, LP_NORMAL, LP_REDIRECT, LP_UNUSED};
+
+    // Known bit patterns of `ItemIdData { lp_off:15, lp_flags:2, lp_len:15 }`
+    // as GCC and Clang lay it out: from the least significant bit on
+    // little-endian targets, from the most significant bit on big-endian.
+    #[cfg(target_endian = "little")]
+    fn pattern(off: u32, flags: u32, len: u32) -> u32 {
+        off | flags << 15 | len << 17
+    }
+    #[cfg(target_endian = "big")]
+    fn pattern(off: u32, flags: u32, len: u32) -> u32 {
+        off << 17 | flags << 15 | len
+    }
+
+    fn from_raw(raw: u32) -> ItemIdData {
+        // SAFETY: every bit pattern is a valid ItemIdData.
+        unsafe { std::mem::transmute::<u32, ItemIdData>(raw) }
+    }
+
+    fn raw(iid: ItemIdData) -> u32 {
+        // SAFETY: ItemIdData is a 4-byte plain bit-field struct.
+        unsafe { std::mem::transmute::<ItemIdData, u32>(iid) }
+    }
+
+    #[test]
+    fn item_id_bit_patterns() {
+        assert_eq!(size_of::<ItemIdData>(), 4);
+        for (off, flags, len) in [
+            (0, LP_UNUSED, 0),
+            (8152, LP_NORMAL, 40),
+            (24, LP_NORMAL, 8168),
+            (0x7FFF, LP_DEAD, 0x7FFF),
+            (0x4001, LP_REDIRECT, 0x0002),
+            (0, LP_DEAD, 0),
+            (0x7FFF, LP_UNUSED, 0),
+            (0, LP_UNUSED, 0x7FFF),
+        ] {
+            let iid = from_raw(pattern(off, flags, len));
+            assert_eq!(
+                (iid.lp_off(), iid.lp_flags(), iid.lp_len()),
+                (off, flags, len)
+            );
+            let built = ItemIdData {
+                _bitfield_align_1: [],
+                _bitfield_1: ItemIdData::new_bitfield_1(off, flags, len),
+            };
+            assert_eq!(raw(built), pattern(off, flags, len));
+        }
+        // Little-endian words as PostgreSQL writes them into pd_linp.
+        #[cfg(target_endian = "little")]
+        {
+            // lp_off = 8152, LP_NORMAL, lp_len = 40
+            let iid = from_raw(0x0050_9FD8);
+            assert_eq!(
+                (iid.lp_off(), iid.lp_flags(), iid.lp_len()),
+                (8152, LP_NORMAL, 40)
+            );
+            assert_eq!(from_raw(0x0001_8000).lp_flags(), LP_DEAD);
+            assert_eq!(from_raw(0x0000_8000).lp_flags(), LP_NORMAL);
+            assert_eq!(from_raw(0x0001_0000).lp_flags(), LP_REDIRECT);
+            assert_eq!(from_raw(0xFFFE_7FFF).lp_flags(), LP_UNUSED);
+        }
     }
 }

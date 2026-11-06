@@ -7,18 +7,19 @@
 // Maintained by Ruohang Feng @ PGSTY (rh@vonng.com)
 
 use bm25::vector::{Document, Element, Query, intern};
+use pgrx::pg_sys::WordEntry;
 use std::num::Saturating;
 
 #[derive(Debug, Clone)]
 pub struct TsVectorOwned {
-    entries: Vec<u32>,
+    entries: Vec<WordEntry>,
     bytes: Vec<u8>,
 }
 
 impl TsVectorOwned {
     #[expect(dead_code)]
     #[inline(always)]
-    pub fn new(entries: Vec<u32>, bytes: Vec<u8>) -> Self {
+    pub fn new(entries: Vec<WordEntry>, bytes: Vec<u8>) -> Self {
         Self { entries, bytes }
     }
 }
@@ -36,7 +37,7 @@ impl TsVectorOwned {
 
 #[derive(Debug, Clone, Copy)]
 pub struct TsVectorBorrowed<'a> {
-    entries: &'a [u32],
+    entries: &'a [WordEntry],
     bytes: &'a [u8],
 }
 
@@ -44,7 +45,7 @@ impl<'a> TsVectorBorrowed<'a> {
     /// `entries` are the `WordEntry` words, `bytes` the lexeme and position
     /// data that follows them (the rest of the datum).
     #[inline(always)]
-    pub fn new(entries: &'a [u32], bytes: &'a [u8]) -> Self {
+    pub fn new(entries: &'a [WordEntry], bytes: &'a [u8]) -> Self {
         Self { entries, bytes }
     }
 
@@ -70,14 +71,13 @@ pub fn layout(varsize: usize, len: usize) -> Result<usize, &'static str> {
         .ok_or("the entries do not fit in the datum")
 }
 
-fn lexeme(entry: u32, bytes: &[u8]) -> Result<(&[u8], Option<u16>), &'static str> {
-    let haspos = (entry >> 0) & ((1 << 1) - 1);
-    let len = (entry >> 1) & ((1 << 11) - 1);
-    let pos = (entry >> 12) & ((1 << 20) - 1);
-    let start = pos as usize;
-    let end = start + len as usize;
+fn lexeme(entry: WordEntry, bytes: &[u8]) -> Result<(&[u8], Option<u16>), &'static str> {
+    // WordEntry { uint32 haspos:1, len:11, pos:20; } is a C bit-field whose
+    // placement depends on the target; use the generated accessors.
+    let start = entry.pos() as usize;
+    let end = start + entry.len() as usize;
     let string = bytes.get(start..end).ok_or("a lexeme is out of bounds")?;
-    if haspos == 0 {
+    if entry.haspos() == 0 {
         return Ok((string, None));
     }
     // WordEntryPosVector { uint16 npos; WordEntryPos pos[npos]; }, at the
@@ -179,13 +179,71 @@ mod tests {
 
     type Lexeme<'a> = (&'a [u8], Option<&'a [u16]>);
 
-    fn entry(haspos: bool, len: usize, pos: usize) -> u32 {
-        (haspos as u32) | (len as u32) << 1 | (pos as u32) << 12
+    fn entry(haspos: bool, len: usize, pos: usize) -> WordEntry {
+        WordEntry {
+            _bitfield_align_1: [],
+            _bitfield_1: WordEntry::new_bitfield_1(haspos as u32, len as u32, pos as u32),
+        }
+    }
+
+    fn raw(entry: WordEntry) -> u32 {
+        // SAFETY: WordEntry is a 4-byte plain bit-field struct.
+        unsafe { std::mem::transmute::<WordEntry, u32>(entry) }
+    }
+
+    fn from_raw(raw: u32) -> WordEntry {
+        // SAFETY: every bit pattern is a valid WordEntry.
+        unsafe { std::mem::transmute::<u32, WordEntry>(raw) }
+    }
+
+    // Known bit patterns of the C bit-field `haspos:1, len:11, pos:20`, as
+    // GCC and Clang lay it out: from the least significant bit on
+    // little-endian targets, from the most significant bit on big-endian.
+    #[cfg(target_endian = "little")]
+    fn pattern(haspos: u32, len: u32, pos: u32) -> u32 {
+        haspos | len << 1 | pos << 12
+    }
+    #[cfg(target_endian = "big")]
+    fn pattern(haspos: u32, len: u32, pos: u32) -> u32 {
+        haspos << 31 | len << 20 | pos
+    }
+
+    #[test]
+    fn word_entry_bit_patterns() {
+        assert_eq!(size_of::<WordEntry>(), 4);
+        for (haspos, len, pos) in [
+            (0, 0, 0),
+            (1, 1, 0),
+            (0, 3, 1),
+            (1, 2046, 0),
+            (1, 2047, (1 << 20) - 1),
+            (0, 6, 82040),
+            (1, 1, 0xABCDE),
+        ] {
+            let decoded = from_raw(pattern(haspos, len, pos));
+            assert_eq!(
+                (decoded.haspos(), decoded.len(), decoded.pos()),
+                (haspos, len, pos)
+            );
+            assert_eq!(
+                raw(entry(haspos != 0, len as _, pos as _)),
+                pattern(haspos, len, pos)
+            );
+        }
+        // The byte offset occupies the high bits on little-endian targets.
+        #[cfg(target_endian = "little")]
+        {
+            assert_eq!(from_raw(0x0001_0000).pos(), 0x10);
+            assert_eq!(from_raw(0x8000_0000).pos(), 0x80000);
+            assert_eq!(from_raw(0x0000_0FFE).len(), 2047);
+            assert_eq!(from_raw(0x0000_0FFE).pos(), 0);
+            assert_eq!(from_raw(0x0000_0001).haspos(), 1);
+        }
     }
 
     /// Lays out entries and data as PostgreSQL's tsvector input does: each
     /// lexeme, then (2-byte aligned) its position count and positions.
-    fn build(lexemes: &[Lexeme<'_>]) -> (Vec<u32>, Vec<u8>) {
+    fn build(lexemes: &[Lexeme<'_>]) -> (Vec<WordEntry>, Vec<u8>) {
         let mut entries = Vec::new();
         let mut bytes = Vec::new();
         for &(lexeme, positions) in lexemes {
@@ -205,7 +263,10 @@ mod tests {
         (entries, bytes)
     }
 
-    fn decode(entries: &[u32], bytes: &[u8]) -> Result<Vec<(Vec<u8>, Option<u16>)>, &'static str> {
+    fn decode(
+        entries: &[WordEntry],
+        bytes: &[u8],
+    ) -> Result<Vec<(Vec<u8>, Option<u16>)>, &'static str> {
         TsVectorBorrowed::new(entries, bytes)
             .iter()
             .map(|r| r.map(|(s, c)| (s.to_vec(), c)))
