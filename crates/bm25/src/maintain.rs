@@ -195,6 +195,10 @@ where
 // rebuild that never published (inserts stamp the published generation), so
 // nothing references them. With `rebuild_fsm`, also reports deleted and
 // never-initialized pages, so a free-space map lost in a crash recovers.
+//
+// A page is reported while its share lock is still held: an allocator must
+// lock the page exclusively to reuse it, so it cannot be taken between the
+// check and the report, and no stale entry is left for a page in use.
 fn sweep<R: RelationRead + RelationWrite>(
     index: &R,
     generation: u64,
@@ -206,15 +210,19 @@ where
 {
     let mut orphans = 0_u32;
     for id in 1..index.npages() {
-        let (reusable, orphan) = {
+        let orphan = {
             let guard = index.read(id);
-            if guard.is_new() {
+            let (reusable, orphan) = if guard.is_new() {
                 (true, false)
             } else {
                 let opaque = *guard.get_opaque();
                 let deleted = opaque.is_deleted();
                 (deleted, !deleted && opaque.generation > generation)
+            };
+            if reusable && rebuild_fsm {
+                index.record_free(id);
             }
+            orphan
         };
         if orphan {
             let guard = index.write(id);
@@ -223,8 +231,6 @@ where
                 index.free(guard);
                 orphans += 1;
             }
-        } else if reusable && rebuild_fsm {
-            index.record_free(id);
         }
         if id % 128 == 0 {
             check();
