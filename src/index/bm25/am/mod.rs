@@ -392,6 +392,9 @@ pub unsafe extern "C-unwind" fn aminsert(
         &index,
         &document.unwrap_or_else(bm25::vector::Document::null),
         ctid_to_key(ctid),
+        || {
+            pgrx::pg_sys::check_for_interrupts!();
+        },
     );
     false
 }

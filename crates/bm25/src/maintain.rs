@@ -18,6 +18,9 @@ use std::io::BufWriter;
 use std::path::Path;
 use zerocopy::{FromBytes, IntoBytes};
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Debug, Default)]
 pub struct Maintained {
     /// Pages of the previous generation released in this pass.
@@ -137,11 +140,13 @@ fn graveyard_set(jump_tuple: &mut JumpTupleWriter<'_>, chain: usize, value: u32)
     } = value;
 }
 
-// Releases the previous generation. Each batch is marked deleted (keeping
-// `next`), then the chain head in the jump tuple moves past it, and only
-// then do the pages enter the FSM. A crash at any point leaves either pages
-// that are revisited through their intact `next`, or deleted pages that the
-// next sweep reports to the FSM.
+// Unlink each retired page and mark it deleted in the SAME WAL record.
+// The FSM is only a hint: its consumption is not WAL-logged, and even a
+// locked sweep can report a page between GetFreeIndexPage and the allocator's
+// page lock. A deleted page must therefore be safe to reuse even when its
+// FSM entry predates this pass. Every replay prefix leaves either an intact
+// retired chain or an unlinked deleted page; it never leaves a reusable page
+// reachable from a graveyard head.
 fn recycle<R: RelationRead + RelationWrite>(index: &R, ptr_jump: u32, check: &impl Fn()) -> u32
 where
     R::Page: Page<Opaque = Opaque>,
@@ -149,35 +154,34 @@ where
     let mut recycled = 0_u32;
     for chain in 0..GRAVEYARD_CHAINS {
         loop {
-            let (mut current, end) = {
-                let jump_guard = index.read(ptr_jump);
-                let jump_bytes = jump_guard.get(1).expect("data corruption");
-                graveyard_get(JumpTuple::deserialize_ref(jump_bytes), chain)
-            };
+            // Lock order: jump, then retired page. Publication takes only
+            // jump; no active growing page belongs to a graveyard chain.
+            let mut jump_guard = index.write(ptr_jump);
+            let jump = JumpTuple::deserialize_ref(jump_guard.get(1).expect("data corruption"));
+            let (current, end) = graveyard_get(jump, chain);
+            let generation = jump.generation();
             if current == end || current == u32::MAX {
+                index.discard(jump_guard);
                 break;
             }
-            let mut batch = Vec::with_capacity(RECYCLE_BATCH);
-            while batch.len() < RECYCLE_BATCH && current != end && current != u32::MAX {
-                let mut guard = index.write(current);
-                let next = guard.get_opaque().next;
-                if !guard.get_opaque().is_deleted() {
-                    guard.get_opaque_mut().set_deleted();
-                }
-                drop(guard);
-                batch.push(current);
-                current = next;
+            let mut page = index.write(current);
+            assert!(
+                page.get_opaque().generation < generation,
+                "data corruption: a graveyard page was reused; REINDEX required"
+            );
+            let next = page.get_opaque().next;
+            page.get_opaque_mut().set_deleted();
+            let jump_bytes = jump_guard.get_mut(1).expect("data corruption");
+            graveyard_set(&mut JumpTuple::deserialize_mut(jump_bytes), chain, next);
+            let page = index.commit_pair(jump_guard, page);
+            index.record_free(current);
+            // commit_pair retains a fresh write record for an appender. We
+            // have no further edits; do not WAL-log an empty record here.
+            index.discard(page);
+            recycled += 1;
+            if recycled as usize % RECYCLE_BATCH == 0 {
+                check();
             }
-            {
-                let mut jump_guard = index.write(ptr_jump);
-                let jump_bytes = jump_guard.get_mut(1).expect("data corruption");
-                graveyard_set(&mut JumpTuple::deserialize_mut(jump_bytes), chain, current);
-            }
-            for &id in batch.iter() {
-                index.record_free(id);
-            }
-            recycled += batch.len() as u32;
-            check();
         }
     }
     let mut jump_guard = index.write(ptr_jump);
@@ -196,9 +200,10 @@ where
 // nothing references them. With `rebuild_fsm`, also reports deleted and
 // never-initialized pages, so a free-space map lost in a crash recovers.
 //
-// A page is reported while its share lock is still held: an allocator must
-// lock the page exclusively to reuse it, so it cannot be taken between the
-// check and the report, and no stale entry is left for a page in use.
+// Report under the share lock so a page cannot be reused between this check
+// and the report. This reduces stale FSM hints but cannot eliminate them:
+// an allocator can have consumed the old hint before acquiring its page lock.
+// Recycling must remain correct with arbitrary stale FSM hints.
 fn sweep<R: RelationRead + RelationWrite>(
     index: &R,
     generation: u64,

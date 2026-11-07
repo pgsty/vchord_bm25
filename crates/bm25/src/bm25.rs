@@ -328,7 +328,7 @@ impl Wand {
 #[derive(Clone)]
 pub struct Cache {
     s0: f64,
-    s1: [f64; 256],
+    s1: std::rc::Rc<[f64; 256]>,
 }
 
 impl Cache {
@@ -336,17 +336,21 @@ impl Cache {
         number_of_documents: u32,
         token_number_of_documents: u32,
         k1: f64,
-        b: f64,
-        avgdl: f64,
+        norms: std::rc::Rc<[f64; 256]>,
     ) -> Self {
-        let avgdl = if avgdl > 0.0 { avgdl } else { 1.0 };
         Self {
             s0: idf(number_of_documents, token_number_of_documents) * (k1 + 1.0),
-            s1: std::array::from_fn(|fieldnorm| {
-                let document_length = fieldnorm_to_length(fieldnorm as u8) as f64;
-                k1 * (1.0 - b + b * document_length / avgdl)
-            }),
+            s1: norms,
         }
+    }
+    // Independent of the query term: prepare once for each corpus average,
+    // and share immutably across terms and search cursors in this preparation.
+    pub fn norms(k1: f64, b: f64, avgdl: f64) -> std::rc::Rc<[f64; 256]> {
+        let avgdl = if avgdl > 0.0 { avgdl } else { 1.0 };
+        std::rc::Rc::new(std::array::from_fn(|fieldnorm| {
+            let document_length = fieldnorm_to_length(fieldnorm as u8) as f64;
+            k1 * (1.0 - b + b * document_length / avgdl)
+        }))
     }
     pub fn evaluate(&self, fieldnorm: u8, term_frequency: u32) -> f64 {
         let term_frequency = term_frequency as f64;

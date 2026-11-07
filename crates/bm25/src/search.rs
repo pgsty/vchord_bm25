@@ -576,8 +576,8 @@ mod tests {
                         for &(norm, tf) in &documents {
                             wand.push(norm, tf, k1, b, avg_build);
                         }
-                        let build = Cache::new(10000, 3000, k1, b, avg_build);
-                        let query = Cache::new(10000, 3000, k1, b, avg_query);
+                        let build = Cache::new(10000, 3000, k1, Cache::norms(k1, b, avg_build));
+                        let query = Cache::new(10000, 3000, k1, Cache::norms(k1, b, avg_query));
                         let bound = upper_bound(
                             &build,
                             drift.max(1.0),

@@ -185,6 +185,8 @@ impl Prepared {
         };
         let sealed = Checked::new(index, jump.generation, reader);
         let mut tokens = Vec::with_capacity(query.len());
+        let norms = Cache::norms(k1, b, avgdl);
+        let bound_norms = Cache::norms(k1, b, sealed_avgdl);
         for (q, &key) in query.iter().enumerate() {
             let (count, fieldnorm, tf, ptr) =
                 address_tokens::read(&sealed, jump.depth_tokens, jump.start_tokens, key)
@@ -206,8 +208,8 @@ impl Prepared {
                 wand_fieldnorm: fieldnorm,
                 wand_term_frequency: tf,
                 wptr_summaries: ptr,
-                bm25: Cache::new(n, total_df, k1, b, avgdl),
-                bound: Cache::new(n, total_df, k1, b, sealed_avgdl),
+                bm25: Cache::new(n, total_df, k1, norms.clone()),
+                bound: Cache::new(n, total_df, k1, bound_norms.clone()),
             });
             check();
         }
@@ -244,6 +246,8 @@ impl Prepared {
             + self.tokens.capacity() * size_of::<Token>()
             + self.growing.capacity() * size_of::<Growing>()
             + self.query.len() * size_of::<[u8; crate::WIDTH]>()
+            // Two shared normalization arrays, including Rc's two counters.
+            + usize::from(!self.tokens.is_empty()) * 2 * (size_of::<[f64; 256]>() + 2 * size_of::<usize>())
     }
 
     pub fn evaluate(&self, document: &Document) -> f64 {

@@ -1,5 +1,5 @@
-# Statistics shared within one execution. Every query below has 20 terms, so
-# each prepared entry is larger than work_mem = 64kB on its own.
+# Statistics shared within one execution. The 5000 growing documents make
+# each prepared entry larger than work_mem = 64kB even with shared norm tables.
 statement ok
 CREATE TABLE stats_cache (id integer PRIMARY KEY, body tsvector);
 
@@ -10,6 +10,9 @@ FROM generate_series(1, 300) AS i;
 
 statement ok
 CREATE INDEX stats_cache_bm25 ON stats_cache USING bm25 (body bm25_ops);
+
+statement ok
+INSERT INTO stats_cache SELECT i, to_tsvector('simple', 'common w2 a2 filler' || i) FROM generate_series(301, 5300) AS i;
 
 statement ok
 SET work_mem = '64kB';

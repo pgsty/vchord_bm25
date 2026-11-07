@@ -22,6 +22,7 @@ import math
 import os
 from pathlib import Path
 import random
+import re
 import shutil
 import signal
 import statistics
@@ -37,8 +38,9 @@ REPO = Path(__file__).resolve().parents[1]
 
 
 class Cluster:
-    def __init__(self, pg_config):
+    def __init__(self, pg_config, build_dir=None):
         self.bin = Path(subprocess.check_output([pg_config, '--bindir'], text=True).strip())
+        self.build_dir = Path(build_dir).resolve() if build_dir else REPO / 'build'
         self.tmp = tempfile.TemporaryDirectory(prefix='bm25-acceptance-',dir='/tmp')
         self.root = Path(self.tmp.name)
         self.data = self.root / 'data'
@@ -52,8 +54,8 @@ class Cluster:
 
     def __enter__(self):
         self.command('initdb', '-D', self.data, '-U', 'bm25test', '-A', 'trust', '--no-locale', '-E', 'UTF8')
-        shutil.copytree(REPO / 'build/sharedir', self.root / 'share')
-        library = next((REPO / 'build/pkglibdir').glob('vchord_bm25.*'))
+        shutil.copytree(self.build_dir / 'sharedir', self.root / 'share')
+        library = next((self.build_dir / 'pkglibdir').glob('vchord_bm25.*'))
         shutil.copy2(library, self.root / library.name)
         control = self.root / 'share/extension/vchord_bm25.control'
         control.write_text(control.read_text().replace("module_pathname = 'vchord_bm25'", f"module_pathname = '{self.root}/vchord_bm25'"))
@@ -349,6 +351,61 @@ def background(cluster, sql, slow=False):
     return c,worker,errors
 
 
+def recycle_wal_atomicity(cluster):
+    """Check real PostgreSQL WAL, complementing the per-record crash model."""
+    with cluster.connect() as c:
+        c.execute("CREATE TABLE wal_recycle(id int, v tsvector); INSERT INTO wal_recycle SELECT i,to_tsvector('simple','term word'||i) FROM generate_series(1,5000)i; CREATE INDEX wal_recycle_bm ON wal_recycle USING bm25(v bm25_ops)")
+        c.execute("INSERT INTO wal_recycle SELECT i,'term:1'::tsvector FROM generate_series(5001,6000)i")
+        assert scalar(c, "SELECT bm25_maintain('wal_recycle_bm')")
+        c.execute('SELECT pg_current_xact_id()')
+        before = state(c, 'wal_recycle_bm')
+        meta = bytes(scalar(c, "SELECT get_raw_page('wal_recycle_bm', 0)"))
+        item = struct.unpack_from('=I', meta, 24)[0] & 0x7fff
+        jump = struct.unpack_from('=I', meta, item + 32)[0]
+        rel = c.execute("SELECT coalesce(nullif(reltablespace,0),dattablespace),d.oid,pg_relation_filenode(c.oid) FROM pg_class c CROSS JOIN pg_database d WHERE c.oid='wal_recycle_bm'::regclass AND d.datname=current_database()").fetchone()
+        start = str(scalar(c, 'SELECT pg_current_wal_insert_lsn()'))
+        assert not scalar(c, "SELECT bm25_maintain('wal_recycle_bm')")
+        end = str(scalar(c, 'SELECT pg_current_wal_insert_lsn()'))
+        after = state(c, 'wal_recycle_bm')
+        freed = after['free'] - before['free']
+        assert freed > 0 and after['horizon'] == 0
+        c.execute('SELECT pg_switch_wal()')
+        dump = cluster.command('pg_waldump', '-p', cluster.data / 'pg_wal',
+                               '-s', start, '-e', end, '-r', 'Generic',
+                               '-R', '/'.join(map(str, rel)), '-b').stdout
+        records = re.split(r'(?m)(?=^rmgr:)', dump)
+        blocks = [list(map(int, re.findall(r'fork main blk (\d+)', record))) for record in records if record.strip()]
+        assert all(b == [jump] or len(b) == 2 and b[0] == jump for b in blocks), dump
+        assert sum(len(b) == 2 for b in blocks) == freed, (freed, blocks, dump)
+        print('PASS atomic recycle WAL:', freed, 'deleted pages each paired with jump', flush=True)
+        c.execute('DROP TABLE wal_recycle')
+
+
+def concurrent_statistics(cluster):
+    """A native scan's displayed scores retain their preparation across writes."""
+    with cluster.connect() as writer:
+        writer.execute("CREATE TABLE score_concurrent(id int, v tsvector); INSERT INTO score_concurrent SELECT i,to_tsvector('simple',CASE WHEN i%2=0 THEN 'term common' ELSE 'term filler' END) FROM generate_series(1,1000)i; CREATE INDEX score_concurrent_bm ON score_concurrent USING bm25(v bm25_ops)")
+        writer.execute("INSERT INTO score_concurrent SELECT i,'term:1'::tsvector FROM generate_series(1001,6000)i")
+        expr = "v <&> to_bm25query('term:1'::tsvector,'score_concurrent_bm')"
+        expected = dict(writer.execute('SELECT id,'+expr+' FROM score_concurrent').fetchall())
+        noise = ','.join("v <&> to_bm25query(to_tsvector('simple','q%s'),'score_concurrent_bm')" % n for n in range(9))
+        sql = 'SELECT id,'+expr+','+noise+' FROM score_concurrent ORDER BY '+expr
+        with psycopg.connect(cluster.dsn) as reader:
+            reader.execute("SET enable_seqscan=off; SET enable_sort=off; SET work_mem='64kB'; SET \"bm25.limit\"=3")
+            plan = str(reader.execute('EXPLAIN '+sql).fetchall())
+            assert 'Index Scan using score_concurrent_bm' in plan, plan
+            with reader.cursor(name='consistent_scores') as cursor:
+                cursor.execute(sql)
+                rows = cursor.fetchmany(1)
+                writer.execute("INSERT INTO score_concurrent SELECT i,'other:1'::tsvector FROM generate_series(6001,6500)i")
+                rows += cursor.fetchall()
+            assert len(rows) == len(expected)
+            assert all(row[1] == expected[row[0]] for row in rows)
+        assert scalar(writer, 'SELECT '+expr+' FROM score_concurrent WHERE id=1') != expected[1]
+        writer.execute('DROP TABLE score_concurrent')
+    print('PASS concurrent inserts preserve pinned scan/scalar statistics; next execution refreshes', flush=True)
+
+
 def recovery(cluster):
     c=cluster.connect()
     c.execute("CREATE TABLE rec(id int PRIMARY KEY,v tsvector); INSERT INTO rec SELECT i,to_tsvector('simple','term '||repeat('word ',i%80+1)||i) FROM generate_series(1,60000)i; CREATE INDEX rec_bm ON rec USING bm25(v bm25_ops) WITH(maintenance_min_rows=1,maintenance_scale_factor=0)")
@@ -467,12 +524,15 @@ def standby(cluster, primary):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--pg-config',default=os.environ.get('PG_CONFIG','pg_config'))
+    parser.add_argument('--build-dir', type=Path, help='isolated xtask build output')
     parser.add_argument('--slt',action='store_true')
     parser.add_argument('--recovery',action='store_true')
     args=parser.parse_args()
-    with Cluster(args.pg_config) as cluster:
+    with Cluster(args.pg_config, args.build_dir) as cluster:
         correctness(cluster)
         lifecycle(cluster)
+        recycle_wal_atomicity(cluster)
+        concurrent_statistics(cluster)
         performance(cluster)
         if args.slt: slt(cluster)
         if args.recovery: recovery(cluster)

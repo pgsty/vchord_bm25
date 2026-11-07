@@ -1,0 +1,172 @@
+# Stored regclass identity is unchanged. Exercise both supported workflows:
+# recreate parsed definitions, or explicitly opt into runtime name lookup.
+statement ok
+CREATE SCHEMA reindex_identity;
+
+statement ok
+CREATE TABLE reindex_identity.docs(id integer, body tsvector);
+
+statement ok
+INSERT INTO reindex_identity.docs SELECT i, to_tsvector('simple', 'term word' || i) FROM generate_series(1, 2000) i;
+
+statement ok
+CREATE INDEX docs_bm ON reindex_identity.docs USING bm25(body bm25_ops);
+
+statement ok
+ANALYZE reindex_identity.docs;
+
+statement ok
+CREATE TABLE reindex_identity.original AS SELECT 'reindex_identity.docs_bm'::regclass::oid AS oid;
+
+statement ok
+CREATE VIEW reindex_identity.bound AS SELECT id, body <&> to_bm25query('term:1', 'reindex_identity.docs_bm') AS score FROM reindex_identity.docs ORDER BY score LIMIT 5;
+
+statement ok
+CREATE FUNCTION reindex_identity.bound_query() RETURNS bm25query IMMUTABLE LANGUAGE sql RETURN to_bm25query('term:1', 'reindex_identity.docs_bm');
+
+statement ok
+CREATE VIEW reindex_identity.by_name AS SELECT id, body <&> to_bm25query('term:1', pg_catalog.to_regclass('reindex_identity.docs_bm')) AS score FROM reindex_identity.docs ORDER BY score LIMIT 5;
+
+statement ok
+CREATE FUNCTION reindex_identity.plan(query text) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE line text; result text := '';
+BEGIN
+    FOR line IN EXECUTE 'EXPLAIN (COSTS OFF) ' || query LOOP
+        result := result || line || E'\n';
+    END LOOP;
+    RETURN result;
+END
+$$;
+
+statement ok
+SET enable_seqscan = off;
+
+query I
+SELECT (reindex_identity.plan('SELECT * FROM reindex_identity.bound') LIKE '%Index Scan using docs_bm%')::int;
+----
+1
+
+# Dynamic identity deliberately uses scalar sorting. Do not imply that it
+# inherits the native index path's performance or relation dependency.
+query I
+SELECT (reindex_identity.plan('SELECT * FROM reindex_identity.by_name') NOT LIKE '%Index Scan using docs_bm%')::int;
+----
+1
+
+query II
+SELECT count(*), count(score) FROM reindex_identity.bound;
+----
+5 5
+
+statement ok
+REINDEX INDEX reindex_identity.docs_bm;
+
+query II
+SELECT count(*), count(score) FROM reindex_identity.bound;
+----
+5 5
+
+query I
+SELECT (oid = 'reindex_identity.docs_bm'::regclass::oid)::int FROM reindex_identity.original;
+----
+1
+
+statement ok
+REINDEX INDEX CONCURRENTLY reindex_identity.docs_bm;
+
+query I
+SELECT (oid <> 'reindex_identity.docs_bm'::regclass::oid)::int FROM reindex_identity.original;
+----
+1
+
+statement error the relation does not exist
+SELECT * FROM reindex_identity.bound;
+
+statement error the relation does not exist
+SELECT body <&> reindex_identity.bound_query() FROM reindex_identity.docs LIMIT 1;
+
+query II
+SELECT count(*), count(score) FROM reindex_identity.by_name;
+----
+5 5
+
+# Replay the original DDL text; pg_get_viewdef AFTER the reindex contains the
+# dangling numeric OID and is not a substitute for the original source.
+statement ok
+CREATE OR REPLACE VIEW reindex_identity.bound AS SELECT id, body <&> to_bm25query('term:1', 'reindex_identity.docs_bm') AS score FROM reindex_identity.docs ORDER BY score LIMIT 5;
+
+statement ok
+CREATE OR REPLACE FUNCTION reindex_identity.bound_query() RETURNS bm25query IMMUTABLE LANGUAGE sql RETURN to_bm25query('term:1', 'reindex_identity.docs_bm');
+
+query II
+SELECT count(*), count(score) FROM reindex_identity.bound;
+----
+5 5
+
+query I
+SELECT count(*) FROM reindex_identity.docs WHERE (body <&> reindex_identity.bound_query()) IS NOT NULL;
+----
+2000
+
+query I
+SELECT (reindex_identity.plan('SELECT * FROM reindex_identity.bound') LIKE '%Index Scan using docs_bm%')::int;
+----
+1
+
+# A grant on the view does not grant access to its corpus statistics.
+statement ok
+CREATE ROLE reindex_identity_reader;
+
+statement ok
+GRANT USAGE ON SCHEMA reindex_identity TO reindex_identity_reader;
+
+statement ok
+GRANT SELECT ON reindex_identity.by_name TO reindex_identity_reader;
+
+statement ok
+SET ROLE reindex_identity_reader;
+
+statement error permission denied for table docs
+SELECT * FROM reindex_identity.by_name;
+
+statement ok
+RESET ROLE;
+
+statement ok
+GRANT SELECT(body) ON reindex_identity.docs TO reindex_identity_reader;
+
+statement ok
+SET ROLE reindex_identity_reader;
+
+query II
+SELECT count(*), count(score) FROM reindex_identity.by_name;
+----
+5 5
+
+statement ok
+RESET ROLE;
+
+# Keep the existing RLS check even for a name-resolved index.
+statement ok
+ALTER TABLE reindex_identity.docs ENABLE ROW LEVEL SECURITY;
+
+statement ok
+SET ROLE reindex_identity_reader;
+
+statement error bm25 cannot expose global corpus statistics under row-level security
+SELECT * FROM reindex_identity.by_name;
+
+statement ok
+RESET ROLE;
+
+statement ok
+DROP OWNED BY reindex_identity_reader;
+
+statement ok
+DROP ROLE reindex_identity_reader;
+
+statement ok
+RESET enable_seqscan;
+
+statement ok
+DROP SCHEMA reindex_identity CASCADE;

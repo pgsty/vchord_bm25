@@ -11,11 +11,15 @@ use crate::bm25::length_to_fieldnorm;
 use crate::tape::TapeWriter;
 use crate::tuples::{JumpTuple, MetaTuple, VectorTuple, WithReader, WithWriter};
 use crate::vector::Document;
-use index::relation::{Page, RelationRead, RelationWrite};
+use index::relation::{Opaque as _, Page, RelationRead, RelationWrite};
 use index::tuples::Bool;
 
-pub fn insert<R: RelationRead + RelationWrite>(index: &R, document: &Document, payload: [u16; 3])
-where
+pub fn insert<R: RelationRead + RelationWrite>(
+    index: &R,
+    document: &Document,
+    payload: [u16; 3],
+    check: impl Fn(),
+) where
     R::Page: Page<Opaque = Opaque>,
 {
     let document_length = document.length();
@@ -27,29 +31,48 @@ where
     let ptr_jump = meta_tuple.ptr_jump();
     drop(meta_guard);
 
-    // Hold the jump page until the document is appended: publication waits
-    // for it, so every page stamped here belongs to the published generation.
-    let jump_guard = index.read(ptr_jump);
-    let jump_bytes = jump_guard.get(1).expect("data corruption");
-    let jump_tuple = JumpTuple::deserialize_ref(jump_bytes);
-    let generation = jump_tuple.generation();
-
-    let first = jump_tuple.tail_hint();
-    let mut current = first;
-    let head = loop {
-        let read = index.read(current);
-        if read.get_opaque().next == u32::MAX {
+    let (jump_guard, head, generation, first) = 'retry: loop {
+        check();
+        let (generation, first) = {
+            let guard = index.read(ptr_jump);
+            let jump = JumpTuple::deserialize_ref(guard.get(1).expect("data corruption"));
+            (jump.generation(), jump.tail_hint())
+        };
+        let mut current = first;
+        loop {
+            // Wait for the current append without holding jump. In particular,
+            // a queue of inserters must not keep publication's shared lock held.
+            let read = index.read(current);
+            let opaque = *read.get_opaque();
             drop(read);
-            let write = index.write(current);
-            if write.get_opaque().next == u32::MAX {
-                break write;
+            if opaque.is_deleted() || opaque.generation > generation {
+                continue 'retry;
             }
-            current = write.get_opaque().next;
-        } else {
-            current = read.get_opaque().next;
+            if opaque.next != u32::MAX {
+                current = opaque.next;
+                check();
+                continue;
+            }
+            let jump_guard = index.read(ptr_jump);
+            let jump = JumpTuple::deserialize_ref(jump_guard.get(1).expect("data corruption"));
+            if jump.generation() != generation {
+                continue 'retry;
+            }
+            // Preserve jump -> page order, but never WAIT for a content lock
+            // while holding jump. A failed attempt drops jump before retrying.
+            let Some(head) = index.try_write(current) else {
+                continue 'retry;
+            };
+            if head.get_opaque().next != u32::MAX {
+                index.discard(head);
+                continue 'retry;
+            }
+            break 'retry (jump_guard, head, generation, first);
         }
     };
 
+    // Retain jump for one append so publication cannot change its generation.
+    // A large document can still extend the relation while holding this lock.
     let mut tape = TapeWriter::from_guard(index, head, generation);
     tape.push(VectorTuple::_2 {
         fieldnorm,

@@ -199,6 +199,7 @@ pub struct PostgresBufferWriteGuard<O: Opaque> {
     page: NonNull<PostgresPage<O>>,
     state: *mut pgrx::pg_sys::GenericXLogState,
     id: u32,
+    full_image: bool,
 }
 
 impl<O: Opaque> PageGuard for PostgresBufferWriteGuard<O> {
@@ -296,6 +297,10 @@ impl<O: Opaque> RelationWriteTypes for PostgresRelation<O> {
 }
 
 impl<O: Opaque> RelationWrite for PostgresRelation<O> {
+    fn discard(&self, mut guard: Self::WriteGuard<'_>) {
+        unsafe { pgrx::pg_sys::GenericXLogAbort(guard.state) };
+        guard.state = std::ptr::null_mut();
+    }
     fn commit_pair<'a>(
         &'a self,
         mut left: Self::WriteGuard<'a>,
@@ -304,10 +309,17 @@ impl<O: Opaque> RelationWrite for PostgresRelation<O> {
         unsafe {
             use pgrx::pg_sys::*;
             let state = GenericXLogStart(self.raw);
-            // Copy the pending page images before aborting their individual
-            // records. The link must never become durable before its target.
-            let l = GenericXLogRegisterBuffer(state, left.buf, 0);
-            let r = GenericXLogRegisterBuffer(state, right.buf, GENERIC_XLOG_FULL_IMAGE as _);
+            // Preserve each guard's WAL mode: allocation needs an image;
+            // recycling two existing pages needs only their small deltas.
+            let flags = |full| {
+                if full {
+                    GENERIC_XLOG_FULL_IMAGE as _
+                } else {
+                    0
+                }
+            };
+            let l = GenericXLogRegisterBuffer(state, left.buf, flags(left.full_image));
+            let r = GenericXLogRegisterBuffer(state, right.buf, flags(right.full_image));
             std::ptr::copy_nonoverlapping(
                 left.page.as_ptr().cast::<u8>(),
                 l.cast(),
@@ -325,6 +337,7 @@ impl<O: Opaque> RelationWrite for PostgresRelation<O> {
             GenericXLogFinish(state);
             drop(left);
             right.state = GenericXLogStart(self.raw);
+            right.full_image = false;
             right.page =
                 NonNull::new(GenericXLogRegisterBuffer(right.state, right.buf, 0).cast()).unwrap();
             right
@@ -355,7 +368,32 @@ impl<O: Opaque> RelationWrite for PostgresRelation<O> {
                 page: page.cast(),
                 state,
                 id,
+                full_image: false,
             }
+        }
+    }
+    fn try_write(&self, id: u32) -> Option<PostgresBufferWriteGuard<O>> {
+        assert!(id != u32::MAX, "no such page");
+        unsafe {
+            use pgrx::pg_sys::{
+                ConditionalLockBuffer, GenericXLogRegisterBuffer, GenericXLogStart, ReadBuffer,
+                ReleaseBuffer,
+            };
+            let buf = ReadBuffer(self.raw, id);
+            if !ConditionalLockBuffer(buf) {
+                ReleaseBuffer(buf);
+                return None;
+            }
+            let state = GenericXLogStart(self.raw);
+            let page = NonNull::new(GenericXLogRegisterBuffer(state, buf, 0).cast())
+                .expect("failed to get page");
+            Some(PostgresBufferWriteGuard {
+                buf,
+                page,
+                state,
+                id,
+                full_image: false,
+            })
         }
     }
     fn alloc(&self, opaque: <Self::Page as Page>::Opaque) -> PostgresBufferWriteGuard<O> {
@@ -440,6 +478,7 @@ impl<O: Opaque> RelationWrite for PostgresRelation<O> {
                 page: page.cast(),
                 state,
                 id: pgrx::pg_sys::BufferGetBlockNumber(buf),
+                full_image: true,
             }
         }
     }

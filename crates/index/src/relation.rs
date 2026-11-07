@@ -73,8 +73,12 @@ pub trait RelationWriteTypes: Relation {
 
 pub trait RelationWrite: RelationWriteTypes {
     fn write(&self, id: u32) -> Self::WriteGuard<'_>;
+    /// Try the page lock without waiting behind another reader or writer.
+    fn try_write(&self, id: u32) -> Option<Self::WriteGuard<'_>>;
+    /// Discard the guard's pending changes and release it without emitting WAL.
+    fn discard(&self, guard: Self::WriteGuard<'_>);
     fn alloc(&self, opaque: <Self::Page as Page>::Opaque) -> Self::WriteGuard<'_>;
-    /// Publish a page link and initialize its target in one WAL record.
+    /// Commit both locked pages in one WAL record, in left/right lock order.
     /// Releases `left`, retaining the lock on `right` for further appends.
     fn commit_pair<'a>(
         &'a self,
