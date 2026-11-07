@@ -69,9 +69,16 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: refs/tags/${{ needs.semver.outputs.SEMVER }}
+          fetch-depth: 0
 
       - name: Build
+        env:
+          SEMVER: ${{ needs.semver.outputs.SEMVER }}
         run: |
+          test "$(git rev-list -n 1 "refs/tags/${SEMVER}")" = "$(git rev-parse HEAD)"
+          echo "Building ${SEMVER} from $(git rev-parse HEAD)"
           grep -q "default_version = '${{ needs.semver.outputs.SEMVER }}'" vchord_bm25.control || exit 1
           make build
 
