@@ -57,7 +57,7 @@ where
         let key = i as u64;
         if growing.score > 0.0
             && remaining(growing.score, key)
-            && results.threshold() <= growing.score
+            && results.competitive(growing.score, key)
             && filter(growing.payload)
         {
             results.push(growing.score, key, growing.payload);
@@ -220,7 +220,7 @@ where
                 terms.sort_unstable_by_key(|&(ordinal, _)| ordinal);
                 let result = terms.iter().fold(0.0, |sum, &(_, score)| sum + score);
                 let key = base + u64::from(document_id);
-                if remaining(result, key) && filter(payload) {
+                if remaining(result, key) && results.competitive(result, key) && filter(payload) {
                     results.push(result, key, payload);
                 }
                 check();
@@ -473,6 +473,14 @@ impl Results {
     }
     fn full(&self) -> bool {
         self.internal.len() >= self.limit.get()
+    }
+    /// Whether `(score, key)` would enter the heap, before paying for a filter.
+    fn competitive(&self, score: f64, key: u64) -> bool {
+        !self.full()
+            || self
+                .internal
+                .peek()
+                .is_none_or(|top| (Reverse(Score::from_f64(score)), key) < (top.score, top.key))
     }
     fn push(&mut self, score: f64, key: u64, payload: [u16; 3]) {
         self.internal.push(Entry {

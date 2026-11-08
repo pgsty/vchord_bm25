@@ -385,6 +385,32 @@ def zero_tail(cluster):
     print('PASS zero tail buffer work first batch',first,'all rejected',rejected,'heap pages',pages,flush=True)
 
 
+def prefilter_fetches(cluster):
+    # A prefiltered candidate is fetched and checked only if it can still
+    # enter the batch; the heap threshold only rises, so results are equal.
+    n=40000
+    with cluster.connect() as c:
+        c.execute(f"CREATE TABLE pre(id int PRIMARY KEY,v tsvector); INSERT INTO pre SELECT i,to_tsvector('simple',CASE WHEN i%2=0 THEN 'common ' ELSE '' END || repeat('word ',i%70+1)||'w'||i%499) FROM generate_series(1,{n})i; CREATE INDEX pre_bm ON pre USING bm25(v bm25_ops)")
+        # STABLE, so it may be prefiltered; each evaluation sends one notice.
+        c.execute("CREATE FUNCTION pre_probe(int) RETURNS bool LANGUAGE plpgsql STABLE AS $$BEGIN RAISE NOTICE 'probe'; RETURN $1%11=0; END$$")
+        calls=[0]
+        c.add_notice_handler(lambda d: calls.__setitem__(0,calls[0]+(d.message_primary=='probe')))
+        score="v <&> to_bm25query(to_tsvector('simple','common w17 w23'),'pre_bm')"
+        sql=f"SELECT id,{score} FROM pre WHERE pre_probe(id) ORDER BY {score} LIMIT 10"
+        c.execute('SET enable_seqscan=off; SET enable_sort=off; SET enable_bitmapscan=off; SET bm25.prefilter=on')
+        assert '"Index Name": "pre_bm"' in json.dumps(explain(c,sql))
+        calls[0]=0
+        got=c.execute(sql).fetchall()
+        evaluated=calls[0]
+        c.execute('SET bm25.enable_scan=off; SET enable_indexscan=off; RESET enable_seqscan; RESET enable_sort')
+        want=c.execute(sql.replace('pre_probe(id)','id%11=0')).fetchall()
+        assert [s for _,s in got]==[s for _,s in want], (got, want)
+        # Checking every scored candidate evaluated it ~20k times here.
+        assert evaluated < 8000, evaluated
+        c.execute('RESET ALL; DROP TABLE pre; DROP FUNCTION pre_probe(int)')
+    print('PASS prefilter evaluations',evaluated,flush=True)
+
+
 def background(cluster, sql, slow=False):
     c=cluster.connect()
     if slow: c.execute("SET statement_timeout='90s'; SET vacuum_cost_delay='2ms'; SET vacuum_cost_limit=10")
@@ -582,6 +608,7 @@ def main():
         performance(cluster)
         tie_pruning(cluster)
         zero_tail(cluster)
+        prefilter_fetches(cluster)
         if args.slt: slt(cluster)
         if args.recovery: recovery(cluster)
 
