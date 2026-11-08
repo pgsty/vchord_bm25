@@ -65,8 +65,13 @@ where
     }
 
     let mut cursors = Vec::new();
-    for (ordinal, token) in prepared.tokens.iter().enumerate() {
+    for token in prepared.tokens.iter() {
         if let Some(wptr_summaries) = token.wptr_summaries.filter(|_| !positives_done) {
+            // Missing query terms contribute zero to every score. Assigning
+            // dense ordinals to the cursors that can contribute keeps the
+            // summation bitmap proportional to the sealed query terms while
+            // preserving their query order.
+            let dense_ordinal = cursors.len();
             cursors.push(Box::new(Cursor::new(
                 index,
                 token.number_of_documents,
@@ -77,7 +82,7 @@ where
                 token.bound.clone(),
                 prepared.bound_scale,
                 prepared.exact_bounds,
-                ordinal,
+                dense_ordinal,
             )));
         }
         check();
@@ -86,7 +91,7 @@ where
 
     // Buffers reused for every document: summing in ordinal (query) order,
     // as scalar scoring does, must not allocate per document.
-    let mut terms = Terms::new(prepared.tokens.len());
+    let mut terms = Terms::new(cursors.len());
     let mut tail = Vec::<Box<Cursor>>::with_capacity(cursors.len());
     let mut lead = Vec::<Box<Cursor>>::with_capacity(cursors.len());
     let mut head = BinaryHeap::from(cursors);
@@ -907,7 +912,7 @@ mod tests {
             random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
             random
         };
-        for n in [1, 2, 5, 63, 64, 65, 200] {
+        for n in [0, 1, 2, 5, 63, 64, 65, 127, 128, 129, 200] {
             let mut terms = Terms::new(n);
             for _ in 0..200 {
                 terms.clear();
@@ -928,6 +933,29 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn dense_ordinals_preserve_query_order() {
+        let query_terms = [
+            (3, 1.0),
+            (64, 0.75 * f64::EPSILON),
+            (129, 0.75 * f64::EPSILON),
+            (1024, 0.75 * f64::EPSILON),
+        ];
+        let mut terms = Terms::new(query_terms.len());
+        terms.extend(
+            query_terms
+                .iter()
+                .enumerate()
+                .rev()
+                .map(|(ordinal, &(_, value))| (ordinal, value)),
+        );
+        let mut reference = query_terms.to_vec();
+        assert_eq!(
+            terms.sum().to_bits(),
+            sum_by_ordinal(&mut reference).to_bits()
+        );
     }
     use crate::bm25::{Cache, Wand};
 

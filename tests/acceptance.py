@@ -357,22 +357,27 @@ def pivot_rounding(cluster):
                 WITH (options='b = 1.0');
             ANALYZE pivot_rounding""")
         sql="SELECT id,v <&> to_bm25query('a b c d e'::tsvector,'pivot_rounding_bm') score FROM pivot_rounding ORDER BY score"
+        sparse_terms='a b c d e ' + ' '.join(f'missing{i}' for i in range(129))
+        sparse_sql=f"SELECT id,v <&> to_bm25query('{sparse_terms}'::tsvector,'pivot_rounding_bm') score FROM pivot_rounding ORDER BY score"
         c.execute('SET bm25.enable_scan=off; SET enable_indexscan=off; SET enable_bitmapscan=off')
         expected=c.execute(sql).fetchall()
+        sparse_expected=c.execute(sparse_sql).fetchall()
         assert len(expected)==1000 and expected[0][0]==103, expected[:2]
         assert expected[0][1]<expected[1][1], expected[:2]
+        assert sparse_expected == expected, (sparse_expected[:2], expected[:2])
         c.execute('SET bm25.enable_scan=on; SET enable_indexscan=on; SET enable_seqscan=off; SET enable_sort=off; SET "bm25.limit"=100')
         for prefilter in ('off','on'):
             c.execute('SET bm25.prefilter='+prefilter)
-            for suffix in (' LIMIT 1',''):
-                plan=explain(c,sql+suffix)
-                assert '"Index Name": "pivot_rounding_bm"' in json.dumps(plan), plan
-            top=c.execute(sql+' LIMIT 1').fetchall()
-            actual=c.execute(sql).fetchall()
-            assert top==expected[:1], (prefilter,top,expected[:1])
-            assert len(actual)==len({i for i,_ in actual})==1000, (prefilter,len(actual))
-            assert sorted(actual)==sorted(expected), prefilter
-            assert [s for _,s in actual]==[s for _,s in expected], prefilter
+            for query, want in ((sql, expected), (sparse_sql, sparse_expected)):
+                for suffix in (' LIMIT 1',''):
+                    plan=explain(c,query+suffix)
+                    assert '"Index Name": "pivot_rounding_bm"' in json.dumps(plan), plan
+                top=c.execute(query+' LIMIT 1').fetchall()
+                actual=c.execute(query).fetchall()
+                assert top==want[:1], (prefilter,top,want[:1])
+                assert len(actual)==len({i for i,_ in actual})==1000, (prefilter,len(actual))
+                assert sorted(actual)==sorted(want), prefilter
+                assert [s for _,s in actual]==[s for _,s in want], prefilter
         c.execute('RESET ALL; DROP TABLE pivot_rounding')
     print('PASS pivot rounding top1 and complete 1000-row pagination, prefilter off/on',flush=True)
 
