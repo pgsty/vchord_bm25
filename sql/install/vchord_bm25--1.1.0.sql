@@ -79,4 +79,3 @@ CREATE OPERATOR FAMILY bm25_ops USING bm25;
 CREATE OPERATOR CLASS bm25_ops FOR TYPE tsvector USING bm25 FAMILY bm25_ops AS
     OPERATOR 1 <&>(tsvector, bm25query) FOR ORDER BY float_ops;
 /* </end connected objects> */
-
