@@ -16,9 +16,10 @@
             }
         }
     },
+    "release_status": "stable",
     "provides": {
         "vchord_bm25": {
-            "file": "src/lib.rs",
+            "file": "vchord_bm25.control",
             "docfile": "README.md",
             "version": "@DISTVERSION@",
             "abstract": "A postgresql extension for bm25 ranking algorithm"
@@ -38,7 +39,7 @@
     "generated_by": "PGSTY",
     "meta-spec": {
         "version": "1.0.0",
-        "url": "http://pgxn.org/meta/spec.txt"
+        "url": "https://pgxn.org/meta/spec.txt"
     },
     "tags": [
         "vector search",

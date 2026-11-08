@@ -11,3 +11,5 @@ CLAUDE.md
 .vscode/
 .gdb_history
 build
+META.json
+vchord_bm25-*.zip

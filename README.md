@@ -3,7 +3,7 @@
 [![Website: vchord.pgsty.com](https://img.shields.io/badge/Website-vchord.pgsty.com-slategray?style=flat&logo=cilium&logoColor=white)](https://vchord.pgsty.com/)
 [![Docs: bm25](https://img.shields.io/badge/Docs-bm25-slategray?style=flat)](https://vchord.pgsty.com/docs/bm25/)
 [![Catalog: bm25](https://img.shields.io/badge/Catalog-bm25-%233E668F?style=flat&logo=postgresql&logoColor=white&labelColor=3E668F)](https://pgext.cloud/ext/vchord_bm25)
-[![Version: v1.0.0](https://img.shields.io/badge/Version-v1.0.0-slategray?style=flat)](https://github.com/pgsty/vchord_bm25/releases)
+[![Version: v1.1.0](https://img.shields.io/badge/Version-v1.1.0-slategray?style=flat)](https://github.com/pgsty/vchord_bm25/releases)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-slategray?style=flat&logo=gnu&logoColor=white)](https://github.com/pgsty/vchord_bm25/blob/main/LICENSE)
 [![GitHub Stars](https://img.shields.io/github/stars/pgsty/vchord_bm25?style=flat&logo=github&logoColor=black&color=slategray)](https://star-history.com/#pgsty/vchord_bm25&Date)
 [![PostgreSQL: 14-19](https://img.shields.io/badge/PostgreSQL-14--19-%233E668F?style=flat&logo=postgresql&logoColor=white&labelColor=3E668F)](https://pgext.cloud/ext/vchord_bm25)
@@ -13,7 +13,7 @@
 [Website](https://vchord.pgsty.com/) | [Documentation](https://vchord.pgsty.com/docs/bm25/) | [vchord](https://github.com/pgsty/vchord) | [pg_tokenizer](https://github.com/pgsty/pg_tokenizer) | [Blog](https://vchord.pgsty.com/blog/) | [PGEXT](https://pgext.cloud/ext/vchord_bm25) | [Releases](https://github.com/pgsty/vchord_bm25/releases) | [Issues](https://github.com/pgsty/vchord_bm25/issues) | [Upstream](https://github.com/supervc-stack/VectorChord-bm25)
 
 > [!IMPORTANT]
-> **1.0.0** is the first PGSTY release. It indexes PostgreSQL's native `tsvector` and uses a new index format; it is not compatible with the `bm25vector` API or indexes of upstream 0.3.0. See [Migration from 0.3.0](#migration-from-030).
+> **1.1.0** is the current PGSTY release. It keeps the native `tsvector` API and format 4 introduced in 1.0.0, so healthy 1.0.0 indexes do not need a rebuild. The 0.3.0 `bm25vector` API and indexes remain incompatible; see [Migration from 0.3.0](#migration-from-030).
 
 ---
 
@@ -128,6 +128,12 @@ Settings from `postgresql.conf`, `ALTER DATABASE`, `ALTER ROLE`, or client start
 
 Scans continue in growing batches when PostgreSQL requests more rows. `limit` affects performance, not completeness: SQL `LIMIT`, `OFFSET`, and post-filtering do not silently exhaust candidates. Scores of nonmatching documents are zero; SQL NULLs sort last in ascending order. An empty query returns zero for every non-NULL document. Add a `WHERE vector @@ ...` predicate if only matching documents are wanted. Volatile predicates run in the executor, even when prefiltering is enabled.
 
+### 1.1.0 correctness and performance
+
+The WAND upper bounds in 1.1.0 add terms in the same query order as document scoring. This fixes a rare floating-point rounding case in which a near-tied document could be pruned and silently omitted from a complete scan. Results with equal scores use the stable internal index key for their order. The scan reuses a dense ordinal bitmap for terms present in the sealed index, so queries containing many absent terms do not pay for a bitmap sized to every query term.
+
+This release does not promise a fixed speed ratio across workloads. Long, high-frequency multi-term queries can still spend more CPU in bound calculation; measure representative queries and tune the initial `bm25.limit` when needed. `WHERE vector @@ ...` remains an executor filter rather than a native BM25 scan key. Highly selective or empty full-text matches can still walk the zero-score tail; a GIN index can give PostgreSQL a better filtering path for those workloads.
+
 Rows inserted after index creation are searchable immediately. Scans and scalar scoring share cached statistics per executor execution, index, and query; each role is permission-checked separately. `work_mem` is a soft bound for the prepared statistics of one execution: statistics held by a running native scan and those of the 8 most recently used queries are kept even above it, and other queries are evicted least recently used first and prepared again on their next use. Query terms share two immutable length-normalization tables within each preparation; growing-document scores remain proportional to the growing segment size. A statement that cycles through more than 8 distinct queries whose statistics together exceed `work_mem` can therefore prepare some of them again, and those may then see a corpus that changed during the statement. PL/pgSQL expressions evaluated outside a query, such as a loop in a `DO` block, prepare statistics on every call. Statistics count physical non-NULL index records, **including tombstones until compaction removes them**; they are not an MVCC snapshot of the corpus. NULLs are indexed for complete ordering but do not affect corpus statistics. Deletes immediately stop returning tombstoned candidates; compaction can change scores. WAND remains enabled and scales its upper bounds to account for changed average document length. Scalar scoring is `PARALLEL RESTRICTED` to keep the statistics within one executor; parallel scalar scoring is not provided.
 
 The planner charges sequential page work and PostgreSQL CPU/cache costs, with scalar scoring declared `COST 100`. This remains a conservative heuristic, without per-term planner statistics. Small selective B-tree scans can still win. Known query index OIDs exclude other BM25 indexes. Generic plans with a runtime index OID use scalar sorting; a constant index OID permits native scans, even with parameterized query text.
@@ -184,7 +190,7 @@ The recycling and insert-lock repairs retain format 4; existing healthy 1.0.0 in
 - `tsvector <&> bm25query` returns `double precision`.
 - `bm25_maintain(regclass)` requests segment maintenance and returns `boolean`.
 - `bm25_ops` is the explicit operator class for `tsvector` with `USING bm25`.
-- `bm25vector`, its integer-array casts, and the old `bm25_catalog.*` GUCs are not part of 1.0.0.
+- `bm25vector`, its integer-array casts, and the old `bm25_catalog.*` GUCs are not part of 1.1.0.
 
 The access method is named `bm25`. Access method names are unique per database, not per schema, and ParadeDB's `pg_search` also creates an access method named `bm25`, so the two extensions cannot be installed in the same database.
 
@@ -238,6 +244,17 @@ python tests/acceptance.py --pg-config /path/to/pg_config --slt --recovery
 ```
 
 It checks an independent BM25 formula, complete ordering, deferred retirement, real parallel workers, buffer work, insertion scaling, cancellation and crash/replay recovery. `--recovery` deliberately kills only backends in its own temporary cluster. It does not connect to your existing databases. ResourceOwner ownership is hardened; no failing-before reproducer for historical issue #1 has been established.
+
+### PGXN source distribution
+
+PGXN publishes the source distribution, not the prebuilt PostgreSQL and architecture packages from GitHub Releases. After committing the version and checking out the release tag, run:
+
+```bash
+make dist
+# writes vchord_bm25-1.1.0.zip
+```
+
+The archive contains a generated `META.json`, the control file, SQL scripts, Rust sources, and this README. Building it requires Rust, the pinned pgrx toolchain, and PostgreSQL development headers through `PG_CONFIG`. A PGXN Manager account is required for the first upload; the release workflow uploads automatically when the repository has `PGXN_USERNAME` and `PGXN_PASSWORD` secrets.
 
 ## Documentation
 

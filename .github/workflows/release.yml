@@ -1,6 +1,5 @@
 name: Publish
 
-# Temporarily keep publishing manual while the local package builds are validated.
 on:
   workflow_dispatch:
     inputs:
@@ -131,29 +130,42 @@ jobs:
           dpkg-deb --root-owner-group -Zxz --build ~/debian ~/postgresql-${VERSION}-vchord-bm25_${SEMVER}-1_${PLATFORM}.deb
           gh release upload --clobber $SEMVER ~/postgresql-${VERSION}-vchord-bm25_${SEMVER}-1_${PLATFORM}.deb
 
-#  pgxn:
-#    runs-on: "ubuntu-latest"
-#    needs: ["semver", "build"]
-#    env:
-#      SEMVER: ${{ needs.semver.outputs.SEMVER }}
-#      PGXN_PASSWORD: ${{ secrets.PGXN_PASSWORD }}
-#
-#    steps:
-#      - name: Checkout
-#        if: env.PGXN_PASSWORD != ''
-#        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-#
-#      - name: Upload
-#        if: env.PGXN_PASSWORD != ''
-#        run: |
-#          mkdir -p ./build
-#
-#          sed -e "s/@DISTVERSION@/${SEMVER}/g" META.json.in > META.json
-#          git archive --format zip --prefix "vchord_bm25-${SEMVER}/" --add-file META.json -o "./build/vchord_bm25--${SEMVER}.zip" HEAD
-#
-#          curl --fail -sS \
-#            --user "vonng:${PGXN_PASSWORD}" \
-#            -F "submit=Release It!" \
-#            -F "archive=@./build/vchord_bm25--${SEMVER}.zip" \
-#            -H "X-Requested-With: XMLHttpRequest" \
-#            https://manager.pgxn.org/upload
+  pgxn:
+    runs-on: "ubuntu-latest"
+    needs: ["semver", "build"]
+    env:
+      SEMVER: ${{ needs.semver.outputs.SEMVER }}
+      PGXN_USERNAME: ${{ secrets.PGXN_USERNAME }}
+      PGXN_PASSWORD: ${{ secrets.PGXN_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        if: env.PGXN_USERNAME != '' && env.PGXN_PASSWORD != ''
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: refs/tags/${{ needs.semver.outputs.SEMVER }}
+          fetch-depth: 0
+
+      - name: Build PGXN source archive
+        if: env.PGXN_USERNAME != '' && env.PGXN_PASSWORD != ''
+        run: |
+          test "$(git rev-list -n 1 "refs/tags/${SEMVER}")" = "$(git rev-parse HEAD)"
+          test "$(sed -n "s/^default_version = '\([^']*\)'/\1/p" vchord_bm25.control)" = "${SEMVER}"
+          make dist
+          unzip -l "vchord_bm25-${SEMVER}.zip" | grep -q "vchord_bm25-${SEMVER}/META.json"
+
+      - name: Attach PGXN source archive
+        if: env.PGXN_USERNAME != '' && env.PGXN_PASSWORD != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload --clobber "${SEMVER}" "vchord_bm25-${SEMVER}.zip"
+
+      - name: Upload to PGXN
+        if: env.PGXN_USERNAME != '' && env.PGXN_PASSWORD != ''
+        run: |
+          curl --fail --silent --show-error \
+            --user "${PGXN_USERNAME}:${PGXN_PASSWORD}" \
+            -F "submit=Release It!" \
+            -F "archive=@vchord_bm25-${SEMVER}.zip;type=application/zip" \
+            -H "X-Requested-With: XMLHttpRequest" \
+            https://manager.pgxn.org/upload
