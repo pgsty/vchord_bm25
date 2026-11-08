@@ -93,18 +93,16 @@ where
     'main: loop {
         check();
         let pivot = 'lead: {
-            let mut sum = 0.0f64;
-            for cursor in tail.iter() {
-                sum = add_up(sum, cursor.token_upper_bound());
-            }
+            terms.clear();
+            terms.extend(tail.iter().map(|c| (c.ordinal, c.token_upper_bound())));
             while let Some(cursor) = head.pop() {
                 if cursor.document_id() == u32::MAX {
                     break 'main;
                 }
-                if results.threshold() < add_up(sum, cursor.token_upper_bound()) {
+                terms.push((cursor.ordinal, cursor.token_upper_bound()));
+                if results.threshold() < sum_by_ordinal(&mut terms) {
                     break 'lead cursor;
                 } else {
-                    sum = add_up(sum, cursor.token_upper_bound());
                     tail.push(cursor);
                 }
             }
@@ -132,22 +130,13 @@ where
                 continue 'main;
             }
         }
-        let sum_of_block_upper_bounds = if exact {
-            terms.clear();
-            terms.extend(
-                tail.iter()
-                    .chain(lead.iter())
-                    .map(|c| (c.ordinal, c.block_upper_bound())),
-            );
-            terms.sort_unstable_by_key(|&(ordinal, _)| ordinal);
-            terms.iter().fold(0.0, |sum, &(_, bound)| sum + bound)
-        } else {
-            let mut result = 0.0;
-            for cursor in tail.iter().chain(lead.iter()) {
-                result = add_up(result, cursor.block_upper_bound());
-            }
-            result
-        };
+        terms.clear();
+        terms.extend(
+            tail.iter()
+                .chain(lead.iter())
+                .map(|c| (c.ordinal, c.block_upper_bound())),
+        );
+        let sum_of_block_upper_bounds = sum_by_ordinal(&mut terms);
         let mut evaluate = results.threshold() < sum_of_block_upper_bounds;
         if evaluate && !exact {
             // With length drift, the summaries only give scaled bounds. Each
@@ -160,15 +149,13 @@ where
                     .chain(lead.iter())
                     .map(|c| (c.ordinal, c.block_pair_score())),
             );
-            terms.sort_unstable_by_key(|&(ordinal, _)| ordinal);
-            let floor = terms.iter().fold(0.0, |sum, &(_, score)| sum + score);
+            let floor = sum_by_ordinal(&mut terms);
             if floor <= results.threshold() {
                 terms.clear();
                 for cursor in tail.iter_mut().chain(lead.iter_mut()) {
                     terms.push((cursor.ordinal, cursor.tight_block_upper_bound(index)));
                 }
-                terms.sort_unstable_by_key(|&(ordinal, _)| ordinal);
-                let tight = terms.iter().fold(0.0, |sum, &(_, bound)| sum + bound);
+                let tight = sum_by_ordinal(&mut terms);
                 evaluate = results.threshold() < tight;
             }
         }
@@ -217,8 +204,7 @@ where
                         cursor.bm25().evaluate(fieldnorm, term_frequency),
                     ));
                 }
-                terms.sort_unstable_by_key(|&(ordinal, _)| ordinal);
-                let result = terms.iter().fold(0.0, |sum, &(_, score)| sum + score);
+                let result = sum_by_ordinal(&mut terms);
                 let key = base + u64::from(document_id);
                 if remaining(result, key) && results.competitive(result, key) && filter(payload) {
                     results.push(result, key, payload);
@@ -425,13 +411,13 @@ where
     result
 }
 
-/// Upward-rounded sum of non-negative bounds, exact while the sum is zero.
-fn add_up(sum: f64, bound: f64) -> f64 {
-    if sum == 0.0 {
-        bound
-    } else {
-        (sum + bound).next_up()
-    }
+/// Sum bounds in the same order as document scores. Rounded addition is
+/// monotone in each non-negative term, so termwise bounds remain a bound of
+/// the rounded score, including when the document omits some terms. Rounding
+/// each addition upward in a different order does not provide that guarantee.
+fn sum_by_ordinal(terms: &mut [(usize, f64)]) -> f64 {
+    terms.sort_unstable_by_key(|&(ordinal, _)| ordinal);
+    terms.iter().fold(0.0, |sum, &(_, value)| sum + value)
 }
 
 #[derive(PartialEq, Eq)]
@@ -871,8 +857,75 @@ fn upper_bound(cache: &Cache, scale: f64, exact: bool, fieldnorm: u8, tf: u32) -
 
 #[cfg(test)]
 mod tests {
-    use super::upper_bound;
+    use super::{sum_by_ordinal, upper_bound};
     use crate::bm25::{Cache, Wand};
+
+    #[test]
+    fn reordered_bounds_cover_rounding_in_document_order() {
+        // Adding these small terms after 1.0 rounds up repeatedly. Summing
+        // them first, even with next_up() on every addition, underestimates it.
+        let mut scores = [0.75 * f64::EPSILON; 9];
+        scores[0] = 1.0;
+        let score = scores.iter().fold(0.0, |sum, value| sum + value);
+        let mut bounds = scores.into_iter().enumerate().collect::<Vec<_>>();
+        bounds.rotate_left(1);
+        assert_eq!(sum_by_ordinal(&mut bounds), score);
+        assert_eq!(score, 1.0 + 8.0 * f64::EPSILON);
+    }
+
+    #[test]
+    fn every_cursor_prefix_bounds_its_documents_in_query_order() {
+        let mut random = 20261108_u64;
+        let mut next = || {
+            random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+            random
+        };
+        for n in [0, 1, 2, 5, 17, 64, 257] {
+            for exact in [false, true] {
+                for _ in 0..100 {
+                    let scores = (0..n)
+                        .map(|_| {
+                            let exponent = (960 + next() % 76) << 52;
+                            let fraction = next() & ((1_u64 << 52) - 1);
+                            f64::from_bits(exponent | fraction)
+                        })
+                        .collect::<Vec<_>>();
+                    let bounds = scores
+                        .iter()
+                        .map(|&score| if exact { score } else { score.next_up() })
+                        .collect::<Vec<_>>();
+                    let mut order = (0..n).collect::<Vec<_>>();
+                    for i in (1..n).rev() {
+                        order.swap(i, next() as usize % (i + 1));
+                    }
+                    let mut terms = Vec::new();
+                    let mut present = vec![false; n];
+                    assert_eq!(sum_by_ordinal(&mut terms), 0.0);
+                    for ordinal in order {
+                        present[ordinal] = true;
+                        terms.push((ordinal, bounds[ordinal]));
+                        let score = scores
+                            .iter()
+                            .enumerate()
+                            .filter(|&(i, _)| present[i])
+                            .fold(0.0, |sum, (_, value)| sum + value);
+                        let bound = sum_by_ordinal(&mut terms);
+                        assert!(bound >= score);
+                        if exact {
+                            assert_eq!(bound, score);
+                        }
+                        // A document can omit terms present in the cursor set.
+                        let sparse_score = scores
+                            .iter()
+                            .enumerate()
+                            .filter(|&(i, _)| present[i] && i % 3 != 0)
+                            .fold(0.0, |sum, (_, value)| sum + value);
+                        assert!(bound >= sparse_score);
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn scaled_wand_bound_covers_every_document_after_length_drift() {

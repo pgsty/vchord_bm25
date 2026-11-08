@@ -339,6 +339,44 @@ def performance(cluster):
     print('PASS WAND buffer work',hits(before),hits(after),'insert median seconds',timings,'scalar buffers',one,hundred,flush=True)
 
 
+def pivot_rounding(cluster):
+    # With avgdl=5 and b=1, the length-15/tf-3 row beats the length-5/tf-1
+    # rows by one ulp. After the first 101 rows fill the heap, the common
+    # terms precede 'a' in cursor order. Summing their bounds in that order
+    # used to prune the winner and then lose it permanently across batches.
+    with cluster.connect() as c:
+        c.prepare_threshold=None
+        c.execute("""CREATE TABLE pivot_rounding(id int PRIMARY KEY,v tsvector);
+            INSERT INTO pivot_rounding SELECT i, CASE
+                WHEN i=103 THEN 'a:1,2,3 b:4,5,6 c:7,8,9 d:10,11,12 e:13,14,15'::tsvector
+                WHEN i<=101 OR i BETWEEN 104 AND 224 THEN 'a:1 b:2 c:3 d:4 e:5'::tsvector
+                WHEN i>=999 THEN ''::tsvector
+                ELSE 'b:1 c:2 d:3 e:4 z:5'::tsvector END
+            FROM generate_series(1,1000)i;
+            CREATE INDEX pivot_rounding_bm ON pivot_rounding USING bm25(v bm25_ops)
+                WITH (options='b = 1.0');
+            ANALYZE pivot_rounding""")
+        sql="SELECT id,v <&> to_bm25query('a b c d e'::tsvector,'pivot_rounding_bm') score FROM pivot_rounding ORDER BY score"
+        c.execute('SET bm25.enable_scan=off; SET enable_indexscan=off; SET enable_bitmapscan=off')
+        expected=c.execute(sql).fetchall()
+        assert len(expected)==1000 and expected[0][0]==103, expected[:2]
+        assert expected[0][1]<expected[1][1], expected[:2]
+        c.execute('SET bm25.enable_scan=on; SET enable_indexscan=on; SET enable_seqscan=off; SET enable_sort=off; SET "bm25.limit"=100')
+        for prefilter in ('off','on'):
+            c.execute('SET bm25.prefilter='+prefilter)
+            for suffix in (' LIMIT 1',''):
+                plan=explain(c,sql+suffix)
+                assert '"Index Name": "pivot_rounding_bm"' in json.dumps(plan), plan
+            top=c.execute(sql+' LIMIT 1').fetchall()
+            actual=c.execute(sql).fetchall()
+            assert top==expected[:1], (prefilter,top,expected[:1])
+            assert len(actual)==len({i for i,_ in actual})==1000, (prefilter,len(actual))
+            assert sorted(actual)==sorted(expected), prefilter
+            assert [s for _,s in actual]==[s for _,s in expected], prefilter
+        c.execute('RESET ALL; DROP TABLE pivot_rounding')
+    print('PASS pivot rounding top1 and complete 1000-row pagination, prefilter off/on',flush=True)
+
+
 def tie_pruning(cluster):
     # Equal scores are ordered by index position, which WAND visits in order,
     # so a full heap prunes every later tie; block bounds are exact without
@@ -606,6 +644,7 @@ def main():
         recycle_wal_atomicity(cluster)
         concurrent_statistics(cluster)
         performance(cluster)
+        pivot_rounding(cluster)
         tie_pruning(cluster)
         zero_tail(cluster)
         prefilter_fetches(cluster)
