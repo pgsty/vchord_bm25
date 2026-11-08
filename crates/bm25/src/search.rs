@@ -18,36 +18,46 @@ use std::cmp::{Ordering, Reverse};
 use std::collections::BinaryHeap;
 use std::num::NonZero;
 
+/// Returns the best `k` documents after `after`, best first, as
+/// `(score, key, payload)`.
+///
+/// Results are totally ordered by descending score, then ascending internal
+/// key: growing documents by their position in `prepared`, then sealed
+/// documents by document id. Keys are stable for one preparation, so `after`
+/// resumes a scan exactly. WAND visits sealed documents in key order and every
+/// key already in the heap is smaller, so a document that only ties the k-th
+/// score can never enter it: ties are pruned with strict comparisons.
 pub fn search<R: RelationRead>(
     index: &R,
     k: NonZero<usize>,
     prepared: &Prepared,
-    after: Option<(f64, [u16; 3])>,
+    after: Option<(f64, u64)>,
     mut filter: impl FnMut([u16; 3]) -> bool,
     mut check: impl FnMut(),
     reader: Reader<'_>,
-) -> Vec<(Reverse<Score>, [u16; 3])>
+) -> Vec<(f64, u64, [u16; 3])>
 where
     R::Page: Page<Opaque = Opaque>,
 {
-    let after = after.map(|(score, tid)| (Reverse(Score::from_f64(score)), tid));
-    let remaining = |score: f64, tid: [u16; 3]| {
-        after.is_none_or(|a| (Reverse(Score::from_f64(score)), tid) > a)
-    };
+    let after = after.map(|(score, key)| (Reverse(Score::from_f64(score)), key));
+    let remaining =
+        |score: f64, key: u64| after.is_none_or(|a| (Reverse(Score::from_f64(score)), key) > a);
     let jump = prepared.jump;
     let sealed = Checked::new(index, jump.generation, reader);
     let index = &sealed;
-    let mut results = Results::<[u16; 3]>::new(k, 0.0);
+    let base = prepared.growing.len() as u64;
+    let mut results = Results::new(k);
     // Sealed documents evaluated while the heap was not full, in id order.
     let mut matched = Vec::<u32>::new();
-    for growing in &prepared.growing {
+    for (i, growing) in prepared.growing.iter().enumerate() {
         check();
+        let key = i as u64;
         if growing.score > 0.0
-            && remaining(growing.score, growing.payload)
+            && remaining(growing.score, key)
             && results.threshold() <= growing.score
             && filter(growing.payload)
         {
-            results.push(growing.score, growing.payload);
+            results.push(growing.score, key, growing.payload);
         }
     }
 
@@ -63,11 +73,13 @@ where
                 token.bm25.clone(),
                 token.bound.clone(),
                 prepared.bound_scale,
+                prepared.exact_bounds,
                 ordinal,
             )));
         }
         check();
     }
+    let exact = prepared.exact_bounds;
 
     // Buffers reused for every document: summing in ordinal (query) order,
     // as scalar scoring does, must not allocate per document.
@@ -80,16 +92,16 @@ where
         let pivot = 'lead: {
             let mut sum = 0.0f64;
             for cursor in tail.iter() {
-                sum = (sum + cursor.token_upper_bound()).next_up();
+                sum = add_up(sum, cursor.token_upper_bound());
             }
             while let Some(cursor) = head.pop() {
                 if cursor.document_id() == u32::MAX {
                     break 'main;
                 }
-                if results.threshold() <= (sum + cursor.token_upper_bound()).next_up() {
+                if results.threshold() < add_up(sum, cursor.token_upper_bound()) {
                     break 'lead cursor;
                 } else {
-                    sum = (sum + cursor.token_upper_bound()).next_up();
+                    sum = add_up(sum, cursor.token_upper_bound());
                     tail.push(cursor);
                 }
             }
@@ -117,17 +129,47 @@ where
                 continue 'main;
             }
         }
-        let sum_of_block_upper_bounds = {
+        let sum_of_block_upper_bounds = if exact {
+            terms.clear();
+            terms.extend(
+                tail.iter()
+                    .chain(lead.iter())
+                    .map(|c| (c.ordinal, c.block_upper_bound())),
+            );
+            terms.sort_unstable_by_key(|&(ordinal, _)| ordinal);
+            terms.iter().fold(0.0, |sum, &(_, bound)| sum + bound)
+        } else {
             let mut result = 0.0;
-            for cursor in tail.iter() {
-                result = (result + cursor.block_upper_bound()).next_up();
-            }
-            for cursor in lead.iter() {
-                result = (result + cursor.block_upper_bound()).next_up();
+            for cursor in tail.iter().chain(lead.iter()) {
+                result = add_up(result, cursor.block_upper_bound());
             }
             result
         };
-        if results.threshold() <= sum_of_block_upper_bounds {
+        let mut evaluate = results.threshold() < sum_of_block_upper_bounds;
+        if evaluate && !exact {
+            // With length drift, the summaries only give scaled bounds. Each
+            // block bound is at least the score of its stored pair; when the
+            // threshold is not below those scores' sum, read the blocks for
+            // exact bounds before paying for their documents.
+            terms.clear();
+            terms.extend(
+                tail.iter()
+                    .chain(lead.iter())
+                    .map(|c| (c.ordinal, c.block_pair_score())),
+            );
+            terms.sort_unstable_by_key(|&(ordinal, _)| ordinal);
+            let floor = terms.iter().fold(0.0, |sum, &(_, score)| sum + score);
+            if floor <= results.threshold() {
+                terms.clear();
+                for cursor in tail.iter_mut().chain(lead.iter_mut()) {
+                    terms.push((cursor.ordinal, cursor.tight_block_upper_bound(index)));
+                }
+                terms.sort_unstable_by_key(|&(ordinal, _)| ordinal);
+                let tight = terms.iter().fold(0.0, |sum, &(_, bound)| sum + bound);
+                evaluate = results.threshold() < tight;
+            }
+        }
+        if evaluate {
             {
                 let mut failures = tail.extract_if(.., |cursor| {
                     cursor.seek(index, document_id, &mut check);
@@ -159,7 +201,7 @@ where
             };
             check();
             // Only a heap that never fills reaches the zero-score documents.
-            if results.internal.len() < k.get() {
+            if !results.full() {
                 matched.push(document_id);
             }
             tail.append(&mut lead);
@@ -174,8 +216,9 @@ where
                 }
                 terms.sort_unstable_by_key(|&(ordinal, _)| ordinal);
                 let result = terms.iter().fold(0.0, |sum, &(_, score)| sum + score);
-                if remaining(result, payload) && filter(payload) {
-                    results.push(result, payload);
+                let key = base + u64::from(document_id);
+                if remaining(result, key) && filter(payload) {
+                    results.push(result, key, payload);
                 }
                 check();
             }
@@ -219,7 +262,7 @@ where
             head.extend(lead.drain(..));
         }
     }
-    if results.internal.len() < k.get() {
+    if !results.full() {
         // No positive result was pruned when the heap never filled. Complete
         // SQL ORDER BY with zero scores and NULLs, including empty queries.
         let mut page = jump.ptr_documents;
@@ -241,24 +284,29 @@ where
                 while matched.get(skip).is_some_and(|&m| m < id) {
                     skip += 1;
                 }
+                let key = base + u64::from(id);
                 if !deleted
                     && matched.get(skip) != Some(&id)
-                    && remaining(score, payload)
+                    && remaining(score, key)
                     && filter(payload)
                 {
-                    results.push(score, payload);
+                    results.push(score, key, payload);
                 }
                 id += 1;
                 check();
             }
             page = next;
         }
-        for growing in &prepared.growing {
-            if growing.score <= 0.0
-                && remaining(growing.score, growing.payload)
-                && filter(growing.payload)
-            {
-                results.push(growing.score, growing.payload);
+        for (i, growing) in prepared.growing.iter().enumerate() {
+            // An empty sum is -0.0; zero scores are +0.0.
+            let score = if growing.score == f64::NEG_INFINITY {
+                f64::NEG_INFINITY
+            } else {
+                0.0
+            };
+            let key = i as u64;
+            if growing.score <= 0.0 && remaining(score, key) && filter(growing.payload) {
+                results.push(score, key, growing.payload);
             }
             check();
         }
@@ -266,34 +314,74 @@ where
     results.into_sorted_vec()
 }
 
-struct Results<T: Ord> {
-    limit: NonZero<usize>,
-    threshold: Score,
-    internal: BinaryHeap<(Reverse<Score>, T)>,
+/// Upward-rounded sum of non-negative bounds, exact while the sum is zero.
+fn add_up(sum: f64, bound: f64) -> f64 {
+    if sum == 0.0 {
+        bound
+    } else {
+        (sum + bound).next_up()
+    }
 }
 
-impl<T: Ord> Results<T> {
-    fn new(limit: NonZero<usize>, threshold: f64) -> Self {
+#[derive(PartialEq, Eq)]
+struct Entry {
+    score: Reverse<Score>,
+    key: u64,
+    payload: [u16; 3],
+}
+
+impl PartialOrd for Entry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Entry {
+    // The payload is a function of the key.
+    fn cmp(&self, other: &Self) -> Ordering {
+        (self.score, self.key).cmp(&(other.score, other.key))
+    }
+}
+
+struct Results {
+    limit: NonZero<usize>,
+    threshold: Score,
+    internal: BinaryHeap<Entry>,
+}
+
+impl Results {
+    fn new(limit: NonZero<usize>) -> Self {
         Self {
             limit,
-            threshold: Score::from_f64(threshold),
-            internal: BinaryHeap::new(),
+            threshold: Score::ZERO,
+            internal: BinaryHeap::with_capacity(limit.get().min(4096) + 1),
         }
     }
     fn threshold(&self) -> f64 {
         self.threshold.to_f64()
     }
-    fn push(&mut self, key: f64, value: T) {
-        self.internal.push((Reverse(Score::from_f64(key)), value));
+    fn full(&self) -> bool {
+        self.internal.len() >= self.limit.get()
+    }
+    fn push(&mut self, score: f64, key: u64, payload: [u16; 3]) {
+        self.internal.push(Entry {
+            score: Reverse(Score::from_f64(score)),
+            key,
+            payload,
+        });
         if self.internal.len() > self.limit.get() {
             self.internal.pop();
         }
         if self.internal.len() == self.limit.get() {
-            self.threshold = self.threshold.max(self.internal.peek().unwrap().0.0);
+            self.threshold = self.threshold.max(self.internal.peek().unwrap().score.0);
         }
     }
-    fn into_sorted_vec(self) -> Vec<(Reverse<Score>, T)> {
-        self.internal.into_sorted_vec()
+    fn into_sorted_vec(self) -> Vec<(f64, u64, [u16; 3])> {
+        self.internal
+            .into_sorted_vec()
+            .into_iter()
+            .map(|e| (e.score.0.to_f64(), e.key, e.payload))
+            .collect()
     }
 }
 
@@ -301,6 +389,7 @@ struct Cursor {
     bm25: Cache,
     bound: Cache,
     bound_scale: f64,
+    exact: bool,
     ordinal: usize,
     token_upper_bound: f64,
 
@@ -311,6 +400,7 @@ struct Cursor {
 
     summary: Summary,
     block_upper_bound: f64,
+    tight_block_upper_bound: Option<f64>,
     filled: bool,
     block: Block,
 }
@@ -336,6 +426,7 @@ impl Ord for Cursor {
 }
 
 impl Cursor {
+    #[allow(clippy::too_many_arguments)]
     fn new<R: RelationRead>(
         index: &R,
         token_number_of_documents: u32,
@@ -345,6 +436,7 @@ impl Cursor {
         bm25: Cache,
         bound: Cache,
         bound_scale: f64,
+        exact: bool,
         ordinal: usize,
     ) -> Self
     where
@@ -353,6 +445,7 @@ impl Cursor {
         let token_upper_bound = upper_bound(
             &bound,
             bound_scale,
+            exact,
             token_wand_fieldnorm,
             token_wand_term_frequency,
         );
@@ -376,6 +469,7 @@ impl Cursor {
         let block_upper_bound = upper_bound(
             &bound,
             bound_scale,
+            exact,
             summary.wand_fieldnorm,
             summary.wand_term_frequency,
         );
@@ -383,12 +477,14 @@ impl Cursor {
             bm25,
             bound,
             bound_scale,
+            exact,
             ordinal,
             token_upper_bound,
             document_id: summary.min_document_id,
             position_in_block: 0,
             summary,
             block_upper_bound,
+            tight_block_upper_bound: None,
             filled: false,
             block: Block {
                 document_ids: compression::Decompressed::new(),
@@ -412,6 +508,18 @@ impl Cursor {
     fn block_upper_bound(&self) -> f64 {
         self.block_upper_bound
     }
+    /// The query score of the block's stored pair: documents sharing it score
+    /// exactly this, so no bound of the block is lower.
+    fn block_pair_score(&self) -> f64 {
+        if self.summary.wand_term_frequency == 0 {
+            0.0
+        } else {
+            self.bm25.evaluate(
+                self.summary.wand_fieldnorm,
+                self.summary.wand_term_frequency,
+            )
+        }
+    }
     fn seek_block<R: RelationRead>(&mut self, index: &R, document_id: u32, check: &mut impl FnMut())
     where
         R::Page: Page<Opaque = Opaque>,
@@ -430,10 +538,49 @@ impl Cursor {
         self.block_upper_bound = upper_bound(
             &self.bound,
             self.bound_scale,
+            self.exact,
             self.summary.wand_fieldnorm,
             self.summary.wand_term_frequency,
         );
+        self.tight_block_upper_bound = None;
         self.filled = false;
+    }
+    /// An upper bound of this block under the query's statistics, from its
+    /// term frequencies. Flush stored the pair maximizing the sealed `tf`, so
+    /// every document with term frequency `f` has a sealed `tf` at most the
+    /// pair's, and since `tf` is non-increasing in the fieldnorm, a fieldnorm
+    /// no smaller than the least one that satisfies it. Scores are monotone in
+    /// the fieldnorm too, so that least fieldnorm bounds them; documents that
+    /// share the pair get an exact bound, without any length-drift scaling.
+    fn tight_block_upper_bound<R: RelationRead>(&mut self, index: &R) -> f64
+    where
+        R::Page: Page<Opaque = Opaque>,
+    {
+        if self.exact {
+            return self.block_upper_bound;
+        }
+        if let Some(bound) = self.tight_block_upper_bound {
+            return bound;
+        }
+        if !self.filled {
+            fill_block(
+                &mut self.block,
+                index,
+                self.summary.min_document_id,
+                self.summary.wptr_block,
+            );
+            self.filled = true;
+        }
+        let result = tight_bound(
+            &self.bound,
+            &self.bm25,
+            self.summary.wand_fieldnorm,
+            self.summary.wand_term_frequency,
+            self.block.term_frequencies.as_slice().iter().copied(),
+        );
+        let bound = result.min(self.block_upper_bound);
+        self.tight_block_upper_bound = Some(bound);
+        bound
     }
     fn seek<R: RelationRead>(&mut self, index: &R, document_id: u32, check: &mut impl FnMut())
     where
@@ -549,11 +696,55 @@ fn binary_heap_pop_if<T: Ord>(
     if predicate(top) { this.pop() } else { None }
 }
 
-// Round outward: the real-valued scaling inequality must remain an upper
-// bound after floating-point evaluation and summation. Zero TF is a sentinel.
-fn upper_bound(cache: &Cache, scale: f64, fieldnorm: u8, tf: u32) -> f64 {
+/// See `Cursor::tight_block_upper_bound`: `sealed` has the statistics that
+/// chose the pair, `query` the scan's.
+fn tight_bound(
+    sealed: &Cache,
+    query: &Cache,
+    wand_fieldnorm: u8,
+    wand_term_frequency: u32,
+    term_frequencies: impl Iterator<Item = u32>,
+) -> f64 {
+    let pair = sealed.tf(wand_fieldnorm, wand_term_frequency);
+    let mut seen = [0_u32; 16];
+    let mut distinct = 0;
+    let mut result = 0.0f64;
+    for f in term_frequencies {
+        if seen[..distinct].contains(&f) {
+            continue;
+        }
+        if distinct < seen.len() {
+            seen[distinct] = f;
+            distinct += 1;
+        }
+        // The least fieldnorm whose sealed `tf` does not exceed the pair's.
+        let (mut lo, mut hi) = (0_u16, 256_u16);
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if sealed.tf(mid as u8, f) <= pair {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        if lo == 256 {
+            return f64::INFINITY;
+        }
+        result = result.max(query.evaluate(lo as u8, f));
+    }
+    result
+}
+
+// Without length drift each block's WAND pair was chosen by the same
+// floating-point function `Cache::evaluate` is monotone in, so it bounds the
+// block exactly. With drift, round outward: the real-valued scaling
+// inequality must remain an upper bound after evaluation. Zero TF is a
+// sentinel.
+fn upper_bound(cache: &Cache, scale: f64, exact: bool, fieldnorm: u8, tf: u32) -> f64 {
     if tf == 0 {
         0.0
+    } else if exact {
+        cache.evaluate(fieldnorm, tf)
     } else {
         (cache.evaluate(fieldnorm, tf) * scale * (1.0 + 16.0 * f64::EPSILON)).next_up()
     }
@@ -589,6 +780,7 @@ mod tests {
                         let bound = upper_bound(
                             &build,
                             drift.max(1.0),
+                            false,
                             wand.fieldnorm(),
                             wand.term_frequency(),
                         );
@@ -599,6 +791,99 @@ mod tests {
                             );
                         }
                     }
+                }
+            }
+        }
+    }
+
+    /// The block-content bound stays sound under any length drift, and is
+    /// exact when every document shares the stored pair's term frequency.
+    #[test]
+    fn tight_block_bound_covers_every_document_after_length_drift() {
+        let mut random = 20261109_u64;
+        let mut next = || {
+            random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (random >> 32) as u32
+        };
+        for k1 in [1.2, 2.0] {
+            for b in [0.0, 0.75, 1.0] {
+                for drift in [0.001, 0.5, 0.97, 1.03, 2.0, 1000.0] {
+                    for uniform in [false, true] {
+                        for _ in 0..300 {
+                            let avg_build =
+                                f64::from(next() % 1000 + 1) / f64::from(next() % 7 + 1);
+                            let avg_query = avg_build * drift;
+                            let tf0 = next() % 4 + 1;
+                            let documents = (0..128)
+                                .map(|_| {
+                                    let tf = if uniform { tf0 } else { next() % 8 + 1 };
+                                    ((next() % 200) as u8, tf)
+                                })
+                                .collect::<Vec<_>>();
+                            let mut wand = Wand::new();
+                            for &(norm, tf) in &documents {
+                                wand.push(norm, tf, k1, b, avg_build);
+                            }
+                            let n = next() % 100000 + 1;
+                            let df = next() % n + 1;
+                            let build = Cache::new(n, df, k1, Cache::norms(k1, b, avg_build));
+                            let query = Cache::new(n, df, k1, Cache::norms(k1, b, avg_query));
+                            let bound = super::tight_bound(
+                                &build,
+                                &query,
+                                wand.fieldnorm(),
+                                wand.term_frequency(),
+                                documents.iter().map(|&(_, tf)| tf),
+                            );
+                            let max = documents
+                                .iter()
+                                .map(|&(norm, tf)| query.evaluate(norm, tf))
+                                .fold(0.0, f64::max);
+                            assert!(bound >= max, "unsafe: k1={k1} b={b} drift={drift}");
+                            if uniform {
+                                assert_eq!(bound, max, "inexact: k1={k1} b={b} drift={drift}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Without drift, the stored pair is an exact bound: no document of the
+    /// block scores above it, and its own documents tie it bit for bit.
+    #[test]
+    fn exact_wand_bound_covers_every_document_without_drift() {
+        let mut random = 20261108_u64;
+        let mut next = || {
+            random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (random >> 32) as u32
+        };
+        for k1 in [0.9, 1.2, 2.0] {
+            for b in [0.0, 0.3, 0.75, 1.0] {
+                for _ in 0..2000 {
+                    let avg = f64::from(next() % 1000 + 1) / f64::from(next() % 7 + 1);
+                    let mut wand = Wand::new();
+                    let documents = (0..128)
+                        .map(|_| ((next() % 64) as u8, next() % 8 + 1))
+                        .collect::<Vec<_>>();
+                    for &(norm, tf) in &documents {
+                        wand.push(norm, tf, k1, b, avg);
+                    }
+                    let n = next() % 100000 + 1;
+                    let cache = Cache::new(n, next() % n + 1, k1, Cache::norms(k1, b, avg));
+                    let bound =
+                        upper_bound(&cache, 1.0, true, wand.fieldnorm(), wand.term_frequency());
+                    let mut attained = false;
+                    for (norm, tf) in documents {
+                        let score = cache.evaluate(norm, tf);
+                        assert!(
+                            bound >= score,
+                            "unsafe exact bound: k1={k1} b={b} avg={avg}"
+                        );
+                        attained |= bound == score;
+                    }
+                    assert!(attained);
                 }
             }
         }

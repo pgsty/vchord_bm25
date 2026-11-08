@@ -21,6 +21,8 @@ pub struct Prepared {
     pub(crate) tokens: Vec<Token>,
     pub(crate) growing: Vec<Growing>,
     pub(crate) bound_scale: f64,
+    // Query statistics equal the sealed segment's: block bounds are exact.
+    pub(crate) exact_bounds: bool,
     query: Query,
 }
 
@@ -236,6 +238,7 @@ impl Prepared {
             tokens,
             growing,
             bound_scale: (avgdl / sealed_avgdl).max(1.0),
+            exact_bounds: avgdl.to_bits() == sealed_avgdl.to_bits(),
             query: query.clone(),
         }
     }

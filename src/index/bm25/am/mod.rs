@@ -551,10 +551,10 @@ pub unsafe extern "C-unwind" fn amgettuple(
         }
     }
     loop {
-        if let Some((score, key)) = scanner.scanning.next() {
+        if let Some((score, key, payload)) = scanner.scanning.next() {
             scanner.after = Some((score, key));
             unsafe {
-                (*scan).xs_heaptid = key_to_ctid(key);
+                (*scan).xs_heaptid = key_to_ctid(payload);
                 (*scan).xs_recheck = false;
                 (*scan).xs_recheckorderby = false;
             }
@@ -596,11 +596,7 @@ pub unsafe extern "C-unwind" fn amgettuple(
         drop(fetcher);
         scanner.exhausted = results.len() <= scanner.batch;
         results.truncate(scanner.batch);
-        scanner.scanning = results
-            .into_iter()
-            .map(|(score, key)| (score.0.to_f64(), key))
-            .collect::<Vec<_>>()
-            .into_iter();
+        scanner.scanning = results.into_iter();
         scanner.batch = scanner.batch.saturating_mul(2).min(u32::MAX as usize);
     }
 }
@@ -619,9 +615,10 @@ pub struct Scanner {
     pub hack: Option<NonNull<pgrx::pg_sys::IndexScanState>>,
     pending: Option<(DefaultBuilder, SearchOptions)>,
     prepared: Option<std::rc::Rc<bm25::Prepared>>,
-    after: Option<(f64, [u16; 3])>,
+    // Score and internal key of the last returned row, valid for `prepared`.
+    after: Option<(f64, u64)>,
     batch: usize,
     exhausted: bool,
     prefilter: bool,
-    scanning: std::vec::IntoIter<(f64, [u16; 3])>,
+    scanning: std::vec::IntoIter<(f64, u64, [u16; 3])>,
 }

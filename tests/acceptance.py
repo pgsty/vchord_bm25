@@ -339,6 +339,30 @@ def performance(cluster):
     print('PASS WAND buffer work',hits(before),hits(after),'insert median seconds',timings,'scalar buffers',one,hundred,flush=True)
 
 
+def tie_pruning(cluster):
+    # Equal scores are ordered by index position, which WAND visits in order,
+    # so a full heap prunes every later tie; block bounds are exact without
+    # length drift and tightened from the block contents with it.
+    n=40000
+    with cluster.connect() as c:
+        c.execute(f"CREATE TABLE ties(id int PRIMARY KEY,v tsvector); INSERT INTO ties SELECT i,'common:1'::tsvector FROM generate_series(1,{n})i; CREATE INDEX ties_bm ON ties USING bm25(v bm25_ops)")
+        c.execute('SET enable_seqscan=off; SET enable_sort=off')
+        sql="SELECT id FROM ties ORDER BY v <&> to_bm25query('common:1'::tsvector,'ties_bm') LIMIT 10"
+        hits=lambda: explain(c,sql)['Plan']['Shared Hit Blocks']
+        sealed=hits()
+        c.execute(f"INSERT INTO ties SELECT i,'common:1 other:2'::tsvector FROM generate_series({n+1},{n+400})i")
+        drift=hits()
+        # Scoring every tie reads at least one document page per document.
+        assert sealed < n//20 and drift < n//20, (sealed, drift)
+        c.execute('SET "bm25.limit"=7')
+        full="SELECT count(*),count(DISTINCT id) FROM (SELECT id FROM ties ORDER BY v <&> to_bm25query('common:1'::tsvector,'ties_bm')) s"
+        assert '"Index Name": "ties_bm"' in json.dumps(explain(c,full))
+        count=c.execute(full).fetchone()
+        assert count==(n+400,n+400), count
+        c.execute('RESET ALL; DROP TABLE ties')
+    print('PASS tie pruning buffer work sealed',sealed,'drift',drift,'complete scan',count[0],flush=True)
+
+
 def background(cluster, sql, slow=False):
     c=cluster.connect()
     if slow: c.execute("SET statement_timeout='90s'; SET vacuum_cost_delay='2ms'; SET vacuum_cost_limit=10")
@@ -534,6 +558,7 @@ def main():
         recycle_wal_atomicity(cluster)
         concurrent_statistics(cluster)
         performance(cluster)
+        tie_pruning(cluster)
         if args.slt: slt(cluster)
         if args.recovery: recovery(cluster)
 

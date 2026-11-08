@@ -327,7 +327,8 @@ impl Wand {
 
 #[derive(Clone)]
 pub struct Cache {
-    s0: f64,
+    idf: f64,
+    k1: f64,
     s1: std::rc::Rc<[f64; 256]>,
 }
 
@@ -339,7 +340,8 @@ impl Cache {
         norms: std::rc::Rc<[f64; 256]>,
     ) -> Self {
         Self {
-            s0: idf(number_of_documents, token_number_of_documents) * (k1 + 1.0),
+            idf: idf(number_of_documents, token_number_of_documents),
+            k1,
             s1: norms,
         }
     }
@@ -352,8 +354,16 @@ impl Cache {
             k1 * (1.0 - b + b * document_length / avgdl)
         }))
     }
+    // `idf * tf(..)`, with `tf` evaluated by exactly the operations of `tf()`
+    // that chose each block's WAND pair. Rounding is monotone, so for the same
+    // average length the pair's score is an exact upper bound of its block.
     pub fn evaluate(&self, fieldnorm: u8, term_frequency: u32) -> f64 {
+        self.idf * self.tf(fieldnorm, term_frequency)
+    }
+    /// `tf()` for this cache's average length, bit for bit; non-increasing
+    /// in `fieldnorm`.
+    pub fn tf(&self, fieldnorm: u8, term_frequency: u32) -> f64 {
         let term_frequency = term_frequency as f64;
-        (term_frequency * self.s0) / (term_frequency + self.s1[fieldnorm as usize])
+        (term_frequency * (self.k1 + 1.0)) / (term_frequency + self.s1[fieldnorm as usize])
     }
 }
