@@ -363,6 +363,28 @@ def tie_pruning(cluster):
     print('PASS tie pruning buffer work sealed',sealed,'drift',drift,'complete scan',count[0],flush=True)
 
 
+def zero_tail(cluster):
+    # Zero scores tie: the tail stops once the batch is full and the next
+    # batch resumes at its position instead of reading every document again.
+    n=40000
+    with cluster.connect() as c:
+        c.execute(f"CREATE TABLE tail(id int PRIMARY KEY,v tsvector); INSERT INTO tail SELECT i,to_tsvector('simple','word w'||i%97) FROM generate_series(1,{n})i; CREATE INDEX tail_bm ON tail USING bm25(v bm25_ops)")
+        c.execute('SET enable_seqscan=off; SET enable_sort=off; SET enable_bitmapscan=off; SET "bm25.limit"=7')
+        hits=lambda sql:explain(c,sql)['Plan']['Shared Hit Blocks']
+        pages=scalar(c,"SELECT pg_relation_size('tail')/8192")
+        q="v <&> to_bm25query(to_tsvector('simple','missing'),'tail_bm')"
+        first=hits(f"SELECT id FROM tail ORDER BY {q} LIMIT 10")
+        # The executor rejects every row, so ~13 batches return all of them.
+        rejected=hits(f"SELECT id FROM tail WHERE v @@ 'nothing'::tsquery ORDER BY {q} LIMIT 10")
+        for terms in ('missing','w5 missing'):
+            q=f"v <&> to_bm25query(to_tsvector('simple','{terms}'),'tail_bm')"
+            assert c.execute(f"SELECT count(*),count(DISTINCT id) FROM (SELECT id FROM tail ORDER BY {q}) s").fetchone()==(n,n), terms
+        # Heap pages and one pass over the document pages, not one per batch.
+        assert first < 60 and rejected < 2*pages, (first, rejected, pages)
+        c.execute('RESET ALL; DROP TABLE tail')
+    print('PASS zero tail buffer work first batch',first,'all rejected',rejected,'heap pages',pages,flush=True)
+
+
 def background(cluster, sql, slow=False):
     c=cluster.connect()
     if slow: c.execute("SET statement_timeout='90s'; SET vacuum_cost_delay='2ms'; SET vacuum_cost_limit=10")
@@ -559,6 +581,7 @@ def main():
         concurrent_statistics(cluster)
         performance(cluster)
         tie_pruning(cluster)
+        zero_tail(cluster)
         if args.slt: slt(cluster)
         if args.recovery: recovery(cluster)
 

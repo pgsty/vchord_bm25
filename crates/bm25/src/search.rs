@@ -12,7 +12,7 @@ use crate::prepared::Prepared;
 use crate::tape::TruncatedTapeReader;
 use crate::tuples::*;
 use crate::{Opaque, address_documents, compression};
-use index::relation::{Page, RelationRead};
+use index::relation::{Page, PageGuard, RelationRead};
 use score::Score;
 use std::cmp::{Ordering, Reverse};
 use std::collections::BinaryHeap;
@@ -39,9 +39,9 @@ pub fn search<R: RelationRead>(
 where
     R::Page: Page<Opaque = Opaque>,
 {
-    let after = after.map(|(score, key)| (Reverse(Score::from_f64(score)), key));
+    let after_key = after.map(|(score, key)| (Reverse(Score::from_f64(score)), key));
     let remaining =
-        |score: f64, key: u64| after.is_none_or(|a| (Reverse(Score::from_f64(score)), key) > a);
+        |score: f64, key: u64| after_key.is_none_or(|a| (Reverse(Score::from_f64(score)), key) > a);
     let jump = prepared.jump;
     let sealed = Checked::new(index, jump.generation, reader);
     let index = &sealed;
@@ -49,6 +49,9 @@ where
     let mut results = Results::new(k);
     // Sealed documents evaluated while the heap was not full, in id order.
     let mut matched = Vec::<u32>::new();
+    // Every positive document precedes `after` once the scan reached the zero
+    // or NULL documents; only their identities are needed to skip them below.
+    let positives_done = after.is_some_and(|(score, _)| score <= 0.0);
     for (i, growing) in prepared.growing.iter().enumerate() {
         check();
         let key = i as u64;
@@ -63,7 +66,7 @@ where
 
     let mut cursors = Vec::new();
     for (ordinal, token) in prepared.tokens.iter().enumerate() {
-        if let Some(wptr_summaries) = token.wptr_summaries {
+        if let Some(wptr_summaries) = token.wptr_summaries.filter(|_| !positives_done) {
             cursors.push(Box::new(Cursor::new(
                 index,
                 token.number_of_documents,
@@ -263,55 +266,163 @@ where
         }
     }
     if !results.full() {
-        // No positive result was pruned when the heap never filled. Complete
-        // SQL ORDER BY with zero scores and NULLs, including empty queries.
-        let mut page = jump.ptr_documents;
-        let mut id = 0_u32;
-        let mut skip = 0;
-        let mut docs = Vec::new();
-        while page != u32::MAX {
-            let next = {
-                let guard = index.read(page);
-                docs.clear();
-                docs.extend((1..=guard.len()).map(|i| {
-                    let t = DocumentTuple::deserialize_ref(guard.get(i).expect("data corruption"));
-                    (t.payload(), bool::from(t.deleted()), t.is_null())
-                }));
-                guard.get_opaque().next
-            };
-            for &(payload, deleted, is_null) in &docs {
-                let score = if is_null { f64::NEG_INFINITY } else { 0.0 };
-                while matched.get(skip).is_some_and(|&m| m < id) {
-                    skip += 1;
-                }
-                let key = base + u64::from(id);
-                if !deleted
-                    && matched.get(skip) != Some(&id)
-                    && remaining(score, key)
-                    && filter(payload)
-                {
-                    results.push(score, key, payload);
-                }
-                id += 1;
-                check();
-            }
-            page = next;
+        // No positive result was pruned while the heap was not full: every
+        // positive document was evaluated, and `matched` lists them in order.
+        if positives_done {
+            matched = positive_documents(index, prepared, &mut check);
         }
-        for (i, growing) in prepared.growing.iter().enumerate() {
-            // An empty sum is -0.0; zero scores are +0.0.
-            let score = if growing.score == f64::NEG_INFINITY {
-                f64::NEG_INFINITY
-            } else {
-                0.0
-            };
-            let key = i as u64;
-            if growing.score <= 0.0 && remaining(score, key) && filter(growing.payload) {
-                results.push(score, key, growing.payload);
+        // Zero scores, then NULLs; each tier in key order, from `after` on.
+        let zero_from = match after {
+            None => 0,
+            Some((score, _)) if score > 0.0 => 0,
+            Some((score, key)) if score >= 0.0 => key + 1,
+            Some(_) => u64::MAX,
+        };
+        let null_from = match after {
+            Some((score, key)) if score == f64::NEG_INFINITY => key + 1,
+            _ => 0,
+        };
+        let tiers = [(0.0, zero_from), (f64::NEG_INFINITY, null_from)];
+        for (score, from) in tiers {
+            if results.full() {
+                break;
             }
-            check();
+            let is_null = score == f64::NEG_INFINITY;
+            if !is_null
+                || prepared
+                    .growing
+                    .iter()
+                    .any(|g| g.score == f64::NEG_INFINITY)
+            {
+                for (i, growing) in prepared
+                    .growing
+                    .iter()
+                    .enumerate()
+                    .skip(from.min(base) as usize)
+                {
+                    if results.full() {
+                        break;
+                    }
+                    let tier = if growing.score == f64::NEG_INFINITY {
+                        f64::NEG_INFINITY
+                    } else if growing.score <= 0.0 {
+                        0.0
+                    } else {
+                        continue;
+                    };
+                    let key = i as u64;
+                    if tier == score && remaining(score, key) && filter(growing.payload) {
+                        results.push(score, key, growing.payload);
+                    }
+                    if i % 1024 == 0 {
+                        check();
+                    }
+                }
+            }
+            if results.full() || (is_null && jump.number_of_nulls == 0) {
+                continue;
+            }
+            let start = from.saturating_sub(base);
+            if start >= u64::from(jump.number_of_documents) {
+                continue;
+            }
+            let mut start = start as u32;
+            let mut page = if start == 0 {
+                (jump.ptr_documents, 1)
+            } else {
+                let Some((guard, offset)) = address_documents::read(
+                    index,
+                    jump.width_1_documents,
+                    jump.width_0_documents,
+                    jump.depth_documents,
+                    jump.start_documents,
+                    start,
+                ) else {
+                    continue;
+                };
+                let first = guard.id();
+                // Documents are laid out in id order along the chain.
+                start -= u32::from(offset - 1);
+                (first, offset)
+            };
+            let mut id = start;
+            let mut skip = matched.partition_point(|&m| m < id);
+            let mut documents = Vec::new();
+            while page.0 != u32::MAX && !results.full() {
+                let next = {
+                    let guard = index.read(page.0);
+                    documents.clear();
+                    documents.extend((1..=guard.len()).map(|i| {
+                        let t =
+                            DocumentTuple::deserialize_ref(guard.get(i).expect("data corruption"));
+                        (t.payload(), bool::from(t.deleted()), t.is_null())
+                    }));
+                    guard.get_opaque().next
+                };
+                for (i, &(payload, deleted, null)) in documents.iter().enumerate() {
+                    let this = id;
+                    id += 1;
+                    if (i as u16) + 1 < page.1 {
+                        continue;
+                    }
+                    while skip < matched.len() && matched[skip] < this {
+                        skip += 1;
+                    }
+                    if skip < matched.len() && matched[skip] == this {
+                        continue;
+                    }
+                    let key = base + u64::from(this);
+                    if !deleted && null == is_null && remaining(score, key) && filter(payload) {
+                        results.push(score, key, payload);
+                        if results.full() {
+                            break;
+                        }
+                    }
+                }
+                check();
+                page = (next, 1);
+            }
         }
     }
     results.into_sorted_vec()
+}
+
+/// Sorted ids of sealed documents that contain any query term.
+fn positive_documents<R: RelationRead>(
+    index: &R,
+    prepared: &Prepared,
+    check: &mut impl FnMut(),
+) -> Vec<u32>
+where
+    R::Page: Page<Opaque = Opaque>,
+{
+    let mut result = Vec::new();
+    for (ordinal, token) in prepared.tokens.iter().enumerate() {
+        let Some(wptr_summaries) = token.wptr_summaries else {
+            continue;
+        };
+        let mut cursor = Cursor::new(
+            index,
+            token.number_of_documents,
+            token.wand_fieldnorm,
+            token.wand_term_frequency,
+            wptr_summaries,
+            token.bm25.clone(),
+            token.bound.clone(),
+            prepared.bound_scale,
+            prepared.exact_bounds,
+            ordinal,
+        );
+        while cursor.document_id() != u32::MAX {
+            result.push(cursor.document_id());
+            let next = 1 + cursor.document_id();
+            cursor.seek(index, next, check);
+        }
+        check();
+    }
+    result.sort_unstable();
+    result.dedup();
+    result
 }
 
 /// Upward-rounded sum of non-negative bounds, exact while the sum is zero.
