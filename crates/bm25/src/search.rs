@@ -86,7 +86,7 @@ where
 
     // Buffers reused for every document: summing in ordinal (query) order,
     // as scalar scoring does, must not allocate per document.
-    let mut terms = Vec::<(usize, f64)>::with_capacity(cursors.len());
+    let mut terms = Terms::new(prepared.tokens.len());
     let mut tail = Vec::<Box<Cursor>>::with_capacity(cursors.len());
     let mut lead = Vec::<Box<Cursor>>::with_capacity(cursors.len());
     let mut head = BinaryHeap::from(cursors);
@@ -100,7 +100,7 @@ where
                     break 'main;
                 }
                 terms.push((cursor.ordinal, cursor.token_upper_bound()));
-                if results.threshold() < sum_by_ordinal(&mut terms) {
+                if results.threshold() < terms.sum() {
                     break 'lead cursor;
                 } else {
                     tail.push(cursor);
@@ -136,7 +136,7 @@ where
                 .chain(lead.iter())
                 .map(|c| (c.ordinal, c.block_upper_bound())),
         );
-        let sum_of_block_upper_bounds = sum_by_ordinal(&mut terms);
+        let sum_of_block_upper_bounds = terms.sum();
         let mut evaluate = results.threshold() < sum_of_block_upper_bounds;
         if evaluate && !exact {
             // With length drift, the summaries only give scaled bounds. Each
@@ -149,13 +149,13 @@ where
                     .chain(lead.iter())
                     .map(|c| (c.ordinal, c.block_pair_score())),
             );
-            let floor = sum_by_ordinal(&mut terms);
+            let floor = terms.sum();
             if floor <= results.threshold() {
                 terms.clear();
                 for cursor in tail.iter_mut().chain(lead.iter_mut()) {
                     terms.push((cursor.ordinal, cursor.tight_block_upper_bound(index)));
                 }
-                let tight = sum_by_ordinal(&mut terms);
+                let tight = terms.sum();
                 evaluate = results.threshold() < tight;
             }
         }
@@ -204,7 +204,7 @@ where
                         cursor.bm25().evaluate(fieldnorm, term_frequency),
                     ));
                 }
-                let result = sum_by_ordinal(&mut terms);
+                let result = terms.sum();
                 let key = base + u64::from(document_id);
                 if remaining(result, key) && results.competitive(result, key) && filter(payload) {
                     results.push(result, key, payload);
@@ -415,9 +415,50 @@ where
 /// monotone in each non-negative term, so termwise bounds remain a bound of
 /// the rounded score, including when the document omits some terms. Rounding
 /// each addition upward in a different order does not provide that guarantee.
+#[cfg(test)]
 fn sum_by_ordinal(terms: &mut [(usize, f64)]) -> f64 {
     terms.sort_unstable_by_key(|&(ordinal, _)| ordinal);
     terms.iter().fold(0.0, |sum, &(_, value)| sum + value)
+}
+
+/// Values of distinct query terms, summed exactly as `sum_by_ordinal` does.
+/// Iterating a bitmap over ordinals replaces the sort on every document and
+/// every pivot step.
+struct Terms {
+    values: Vec<f64>,
+    present: Vec<u64>,
+}
+
+impl Terms {
+    fn new(ordinals: usize) -> Self {
+        Self {
+            values: vec![0.0; ordinals],
+            present: vec![0; ordinals.div_ceil(64)],
+        }
+    }
+    fn clear(&mut self) {
+        self.present.fill(0);
+    }
+    fn push(&mut self, (ordinal, value): (usize, f64)) {
+        self.values[ordinal] = value;
+        self.present[ordinal / 64] |= 1 << (ordinal % 64);
+    }
+    fn extend(&mut self, terms: impl IntoIterator<Item = (usize, f64)>) {
+        for term in terms {
+            self.push(term);
+        }
+    }
+    fn sum(&self) -> f64 {
+        let mut sum = 0.0;
+        for (word, &bits) in self.present.iter().enumerate() {
+            let mut bits = bits;
+            while bits != 0 {
+                sum += self.values[word * 64 + bits.trailing_zeros() as usize];
+                bits &= bits - 1;
+            }
+        }
+        sum
+    }
 }
 
 #[derive(PartialEq, Eq)]
@@ -857,7 +898,37 @@ fn upper_bound(cache: &Cache, scale: f64, exact: bool, fieldnorm: u8, tf: u32) -
 
 #[cfg(test)]
 mod tests {
-    use super::{sum_by_ordinal, upper_bound};
+    use super::{Terms, sum_by_ordinal, upper_bound};
+
+    #[test]
+    fn bitmap_sum_equals_ordinal_sort_sum() {
+        let mut random = 20261108_u64;
+        let mut next = || {
+            random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+            random
+        };
+        for n in [1, 2, 5, 63, 64, 65, 200] {
+            let mut terms = Terms::new(n);
+            for _ in 0..200 {
+                terms.clear();
+                let mut reference = Vec::new();
+                for ordinal in 0..n {
+                    if next() % 3 != 0 {
+                        let value = f64::from_bits(((960 + next() % 76) << 52) | (next() >> 12));
+                        reference.push((ordinal, value));
+                    }
+                }
+                for i in (1..reference.len()).rev() {
+                    reference.swap(i, next() as usize % (i + 1));
+                }
+                terms.extend(reference.iter().copied());
+                assert_eq!(
+                    terms.sum().to_bits(),
+                    sum_by_ordinal(&mut reference).to_bits()
+                );
+            }
+        }
+    }
     use crate::bm25::{Cache, Wand};
 
     #[test]
