@@ -15,8 +15,7 @@ use crate::{Opaque, address_documents, compression};
 use index::relation::{Page, RelationRead};
 use score::Score;
 use std::cmp::{Ordering, Reverse};
-use std::collections::{BinaryHeap, HashSet};
-use std::iter::chain;
+use std::collections::BinaryHeap;
 use std::num::NonZero;
 
 pub fn search<R: RelationRead>(
@@ -39,7 +38,8 @@ where
     let sealed = Checked::new(index, jump.generation, reader);
     let index = &sealed;
     let mut results = Results::<[u16; 3]>::new(k, 0.0);
-    let mut matched = HashSet::new();
+    // Sealed documents evaluated while the heap was not full, in id order.
+    let mut matched = Vec::<u32>::new();
     for growing in &prepared.growing {
         check();
         if growing.score > 0.0
@@ -69,11 +69,15 @@ where
         check();
     }
 
-    let mut tail = Vec::<Box<Cursor>>::new();
+    // Buffers reused for every document: summing in ordinal (query) order,
+    // as scalar scoring does, must not allocate per document.
+    let mut terms = Vec::<(usize, f64)>::with_capacity(cursors.len());
+    let mut tail = Vec::<Box<Cursor>>::with_capacity(cursors.len());
+    let mut lead = Vec::<Box<Cursor>>::with_capacity(cursors.len());
     let mut head = BinaryHeap::from(cursors);
     'main: loop {
         check();
-        let lead = 'lead: {
+        let pivot = 'lead: {
             let mut sum = 0.0f64;
             for cursor in tail.iter() {
                 sum = (sum + cursor.token_upper_bound()).next_up();
@@ -91,8 +95,9 @@ where
             }
             break 'main;
         };
-        let document_id = lead.document_id();
-        let mut lead = vec![lead];
+        let document_id = pivot.document_id();
+        lead.clear();
+        lead.push(pivot);
         while let Some(cursor) =
             binary_heap_pop_if(&mut head, |cursor| document_id == cursor.document_id())
         {
@@ -104,13 +109,11 @@ where
                 document_id < cursor.document_id()
             });
             if let Some(failure) = failures.next() {
-                for cursor in lead {
-                    head.push(cursor);
-                }
                 head.push(failure);
                 for failure in failures {
                     head.push(failure);
                 }
+                head.extend(lead.drain(..));
                 continue 'main;
             }
         }
@@ -131,10 +134,8 @@ where
                     document_id < cursor.document_id()
                 });
                 if let Some(failure) = failures.next() {
-                    for cursor in lead {
-                        head.push(cursor);
-                    }
                     head.push(failure);
+                    head.extend(lead.drain(..));
                     continue 'main;
                 }
             };
@@ -157,25 +158,31 @@ where
                 )
             };
             check();
-            matched.insert(document_id);
+            // Only a heap that never fills reaches the zero-score documents.
+            if results.internal.len() < k.get() {
+                matched.push(document_id);
+            }
+            tail.append(&mut lead);
             if !deleted {
-                let mut result = 0.0;
-                let mut ordered = chain(tail.iter_mut(), lead.iter_mut()).collect::<Vec<_>>();
-                ordered.sort_unstable_by_key(|c| c.ordinal);
-                for cursor in ordered {
+                terms.clear();
+                for cursor in tail.iter_mut() {
                     let term_frequency = cursor.get(index);
-                    result += cursor.bm25().evaluate(fieldnorm, term_frequency);
+                    terms.push((
+                        cursor.ordinal,
+                        cursor.bm25().evaluate(fieldnorm, term_frequency),
+                    ));
                 }
+                terms.sort_unstable_by_key(|&(ordinal, _)| ordinal);
+                let result = terms.iter().fold(0.0, |sum, &(_, score)| sum + score);
                 if remaining(result, payload) && filter(payload) {
                     results.push(result, payload);
                 }
                 check();
             }
-            for mut cursor in chain(tail, lead) {
+            for mut cursor in tail.drain(..) {
                 cursor.seek(index, 1 + document_id, &mut check);
                 head.push(cursor);
             }
-            tail = Vec::new();
         } else {
             let min_of_block_max_document_ids = {
                 let mut result = u32::MAX;
@@ -209,9 +216,7 @@ where
             };
             cursor.seek(index, seek_document_id, &mut check);
             head.push(cursor);
-            for cursor in lead.into_iter() {
-                head.push(cursor);
-            }
+            head.extend(lead.drain(..));
         }
     }
     if results.internal.len() < k.get() {
@@ -219,22 +224,25 @@ where
         // SQL ORDER BY with zero scores and NULLs, including empty queries.
         let mut page = jump.ptr_documents;
         let mut id = 0_u32;
+        let mut skip = 0;
+        let mut docs = Vec::new();
         while page != u32::MAX {
-            let (next, docs) = {
+            let next = {
                 let guard = index.read(page);
-                let docs = (1..=guard.len())
-                    .map(|i| {
-                        let t =
-                            DocumentTuple::deserialize_ref(guard.get(i).expect("data corruption"));
-                        (t.payload(), bool::from(t.deleted()), t.is_null())
-                    })
-                    .collect::<Vec<_>>();
-                (guard.get_opaque().next, docs)
+                docs.clear();
+                docs.extend((1..=guard.len()).map(|i| {
+                    let t = DocumentTuple::deserialize_ref(guard.get(i).expect("data corruption"));
+                    (t.payload(), bool::from(t.deleted()), t.is_null())
+                }));
+                guard.get_opaque().next
             };
-            for (payload, deleted, is_null) in docs {
+            for &(payload, deleted, is_null) in &docs {
                 let score = if is_null { f64::NEG_INFINITY } else { 0.0 };
+                while matched.get(skip).is_some_and(|&m| m < id) {
+                    skip += 1;
+                }
                 if !deleted
-                    && !matched.contains(&id)
+                    && matched.get(skip) != Some(&id)
                     && remaining(score, payload)
                     && filter(payload)
                 {
