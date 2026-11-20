@@ -106,6 +106,7 @@ jobs:
       github.event_name == 'workflow_dispatch'
 
     strategy:
+      fail-fast: false
       matrix:
         arch: ["x86_64", "aarch64"]
     runs-on: ${{ matrix.arch == 'x86_64' && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
@@ -141,6 +142,7 @@ jobs:
       github.event_name == 'workflow_dispatch'
 
     strategy:
+      fail-fast: false
       matrix:
         version: ["15", "16", "17", "18", "19"]
         arch: ["x86_64", "aarch64"]
@@ -258,7 +260,7 @@ jobs:
       - name: Logging
         if: always()
         run: |
-          cat /var/log/postgresql/postgresql-${{ matrix.version }}-main.log
+          sudo cat /var/log/postgresql/postgresql-${{ matrix.version }}-main.log
 
   psql_macos:
     if: |
@@ -267,6 +269,7 @@ jobs:
       github.event_name == 'workflow_dispatch'
 
     strategy:
+      fail-fast: false
       matrix:
         version: ["15", "16", "17", "18", "19"]
         arch: ["aarch64", "x86_64"]
@@ -373,6 +376,7 @@ jobs:
       github.event_name == 'workflow_dispatch'
 
     strategy:
+      fail-fast: false
       matrix:
         version: ["15", "16", "17", "18", "19"]
         arch: ["x86_64"]
@@ -484,6 +488,7 @@ jobs:
       github.event_name == 'workflow_dispatch'
 
     strategy:
+      fail-fast: false
       matrix:
         version: ["15", "16", "17"]
         arch: ["x86_64", "aarch64"]
@@ -605,6 +610,7 @@ jobs:
       github.event_name == 'workflow_dispatch'
 
     strategy:
+      fail-fast: false
       matrix:
         include:
           - version: "15"
@@ -690,7 +696,8 @@ jobs:
 
       - name: Install Rust
         run: |
-          rustup default beta
+          # Keep experimental architecture APIs on the validated toolchain.
+          rustup default 1.99.1
           rustup component add rustfmt clippy
           rustup target add ${{ matrix.rust_triple }}
           echo RUSTC_BOOTSTRAP=1 >> $GITHUB_ENV
@@ -715,7 +722,7 @@ jobs:
 
           sudo chroot /sysroot apt-get install -y --no-install-recommends postgresql-common
           sudo chroot /sysroot /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
-          sudo chroot /sysroot apt-get install -y --no-install-recommends postgresql-server-dev-${{ matrix.version }}
+          sudo chroot /sysroot apt-get install -y --no-install-recommends postgresql-server-dev-${{ matrix.version }} libicu-dev
           sudo chroot /sysroot apt-get install -y --no-install-recommends postgresql-${{ matrix.version }}
 
           echo "local all all trust" | sudo tee /sysroot/etc/postgresql/${{ matrix.version }}/main/pg_hba.conf
@@ -796,7 +803,7 @@ jobs:
       - name: Logging
         if: always()
         run: |
-          cat /sysroot/var/log/postgresql/postgresql-${{ matrix.version }}-main.log
+          sudo cat /sysroot/var/log/postgresql/postgresql-${{ matrix.version }}-main.log
 
   check_arch:
     if: |
@@ -805,6 +812,7 @@ jobs:
       github.event_name == 'workflow_dispatch'
 
     strategy:
+      fail-fast: false
       matrix:
         version: ["17", "18", "19"]
 

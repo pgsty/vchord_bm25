@@ -7,13 +7,8 @@
 // Maintained by Ruohang Feng @ PGSTY (rh@vonng.com)
 
 #![allow(unsafe_code)]
-#![cfg_attr(target_arch = "s390x", feature(s390x_target_feature))]
-#![cfg_attr(target_arch = "s390x", feature(stdarch_s390x))]
 #![cfg_attr(target_arch = "powerpc64", feature(stdarch_powerpc_feature_detection))]
-#![cfg_attr(target_arch = "powerpc64", feature(powerpc_target_feature))]
-#![cfg_attr(target_arch = "powerpc64", feature(stdarch_powerpc))]
 #![cfg_attr(target_arch = "riscv64", feature(stdarch_riscv_feature_detection))]
-#![cfg_attr(target_arch = "riscv64", feature(riscv_target_feature))]
 
 mod bitpacking;
 mod emulate;
