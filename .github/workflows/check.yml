@@ -659,7 +659,7 @@ jobs:
     env:
       SCCACHE_GHA_ENABLED: "true"
       RUSTUP_AUTO_INSTALL: "0"
-      RUSTC_WRAPPER: ""
+      RUSTC_WRAPPER: "sccache"
       # RUSTFLAGS: "-Dwarnings"
       CARGO_TERM_COLOR: "always"
       RUST_BACKTRACE: "1"
@@ -776,6 +776,12 @@ jobs:
           BINDGEN_EXTRA_CLANG_ARGS_${{ matrix.rust_triple }} = "--sysroot=/sysroot"
           EOF
 
+      - name: Prepare build sysroot
+        run: |
+          # pgrx 0.20 tracks --sysroot recursively. Exclude runtime mounts
+          # from Cargo's dependency scan and restore them before server startup.
+          sudo umount /sysroot/dev/pts /sysroot/dev /sysroot/proc /sysroot/sys /sysroot/tmp
+
       - name: Cargo Test
         run: cargo test --locked --target ${{ matrix.rust_triple }} --workspace --exclude vchord_bm25 --no-fail-fast -- --no-capture
 
@@ -783,6 +789,7 @@ jobs:
         run: make TARGET=${{ matrix.rust_triple }} PROFILE=dev RUNNER='qemu-${{ matrix.platform }}-static' clippy
 
       - name: Build
+        timeout-minutes: 20
         run: make TARGET=${{ matrix.rust_triple }} PROFILE=dev RUNNER='qemu-${{ matrix.platform }}-static' build
 
       - name: Install
@@ -798,6 +805,11 @@ jobs:
 
       - name: Service
         run: |
+          sudo mount --bind /dev /sysroot/dev
+          sudo mount --bind /dev/pts /sysroot/dev/pts
+          sudo mount --bind /proc /sysroot/proc
+          sudo mount --bind /sys /sysroot/sys
+          sudo mount --bind /tmp /sysroot/tmp
           sudo chroot /sysroot pg_ctlcluster ${{ matrix.version }} main start
           sudo chroot /sysroot psql -d $(whoami) -U $(whoami) -c 'CREATE EXTENSION IF NOT EXISTS vchord_bm25 CASCADE;'
 
