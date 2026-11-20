@@ -277,6 +277,8 @@ jobs:
     runs-on: ${{ matrix.arch == 'aarch64' && 'macos-15' || 'macos-15-intel' }}
 
     env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
       SCCACHE_GHA_ENABLED: "true"
       RUSTUP_AUTO_INSTALL: "0"
       RUSTC_WRAPPER: "sccache"
@@ -287,8 +289,6 @@ jobs:
     steps:
       - name: Set up Environment
         run: |
-          brew update
-
           curl -fsSL https://github.com/risinglightdb/sqllogictest-rs/releases/download/v0.29.0/sqllogictest-bin-v0.29.0-${{ matrix.arch }}-apple-darwin.tar.gz | tar -xOzf - ./sqllogictest | tee /usr/local/bin/sqllogictest > /dev/null && chmod 755 /usr/local/bin/sqllogictest
 
       - name: Install Rust
@@ -296,7 +296,9 @@ jobs:
 
       - name: Install Clang
         run: |
-          brew install llvm@18
+          if [ ! -x "$(brew --prefix llvm@18)/bin/clang" ]; then
+            brew install llvm@18
+          fi
           echo CC=$(brew --prefix llvm@18)/bin/clang >> $GITHUB_ENV
           echo CLANG_PATH=$(brew --prefix llvm@18)/bin/clang >> $GITHUB_ENV
           echo LIBCLANG_PATH=$(brew --prefix llvm@18)/lib >> $GITHUB_ENV
