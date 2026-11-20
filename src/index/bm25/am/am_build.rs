@@ -323,7 +323,7 @@ pub unsafe extern "C-unwind" fn ambuild(
     let index = unsafe { PostgresRelation::new(index_relation) };
     let segment = bm25::io::readers(tempdir.path(), total);
     bm25::build(bm25_options.index, &index, seed, segment, &|| {
-        pgrx::pg_sys::check_for_interrupts!();
+        pgrx::check_for_interrupts();
     });
     // PostgreSQL stores these as `reltuples` of the table and of the index.
     let mut result = unsafe { pgrx::pgbox::PgBox::<pgrx::pg_sys::IndexBuildResult>::alloc0() };
@@ -768,7 +768,7 @@ unsafe fn build(
     drop(records_writer);
     drop(mappings_writer);
     bm25::io::locally_merge(path, order, &|| {
-        pgrx::pg_sys::check_for_interrupts!();
+        pgrx::check_for_interrupts();
     });
 
     sync_2();
@@ -783,7 +783,7 @@ pub unsafe extern "C-unwind" fn ambuildempty(_index_relation: pgrx::pg_sys::Rela
 
 unsafe fn options(index_relation: pgrx::pg_sys::Relation) -> Bm25IndexingOptions {
     let att = unsafe { &mut *(*index_relation).rd_att };
-    #[cfg(any(feature = "pg14", feature = "pg15", feature = "pg16", feature = "pg17"))]
+    #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
     let atts = unsafe { att.attrs.as_slice(att.natts as _) };
     #[cfg(any(feature = "pg18", feature = "pg19"))]
     let atts = unsafe {

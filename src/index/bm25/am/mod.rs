@@ -393,7 +393,7 @@ pub unsafe extern "C-unwind" fn aminsert(
         &document.unwrap_or_else(bm25::vector::Document::null),
         ctid_to_key(ctid),
         || {
-            pgrx::pg_sys::check_for_interrupts!();
+            pgrx::check_for_interrupts();
         },
     );
     false
@@ -415,7 +415,7 @@ pub unsafe extern "C-unwind" fn ambulkdelete(
     }
     let index = unsafe { PostgresRelation::new((*info).index) };
     let check = || unsafe {
-        #[cfg(any(feature = "pg14", feature = "pg15", feature = "pg16", feature = "pg17"))]
+        #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
         pgrx::pg_sys::vacuum_delay_point();
         #[cfg(any(feature = "pg18", feature = "pg19"))]
         pgrx::pg_sys::vacuum_delay_point(false);
@@ -589,7 +589,7 @@ pub unsafe extern "C-unwind" fn amgettuple(
                     .is_some_and(|mut tuple| tuple.filter())
             },
             || {
-                pgrx::pg_sys::check_for_interrupts!();
+                pgrx::check_for_interrupts();
             },
             crate::index::storage::reader(),
         );

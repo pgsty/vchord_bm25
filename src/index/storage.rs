@@ -275,8 +275,7 @@ impl<O: Opaque> RelationRead for PostgresRelation<O> {
         assert!(id != u32::MAX, "no such page");
         unsafe {
             use pgrx::pg_sys::{
-                BUFFER_LOCK_SHARE, BufferGetPage, ForkNumber, LockBuffer, ReadBufferExtended,
-                ReadBufferMode,
+                BUFFER_LOCK_SHARE, ForkNumber, LockBuffer, ReadBufferExtended, ReadBufferMode,
             };
             let buf = ReadBufferExtended(
                 self.raw,
@@ -286,7 +285,8 @@ impl<O: Opaque> RelationRead for PostgresRelation<O> {
                 std::ptr::null_mut(),
             );
             LockBuffer(buf, BUFFER_LOCK_SHARE as _);
-            let page = NonNull::new(BufferGetPage(buf).cast()).expect("failed to get page");
+            let page =
+                NonNull::new(pgrx::BufferGetPage!(buf).get().cast()).expect("failed to get page");
             PostgresBufferReadGuard { buf, page, id }
         }
     }
@@ -403,8 +403,8 @@ impl<O: Opaque> RelationWrite for PostgresRelation<O> {
             };
             let buf = loop {
                 use pgrx::pg_sys::{
-                    BUFFER_LOCK_UNLOCK, BufferGetPage, ConditionalLockBuffer, LockBuffer,
-                    PageIsNew, ReadBuffer, ReleaseBuffer,
+                    BUFFER_LOCK_UNLOCK, ConditionalLockBuffer, LockBuffer, ReadBuffer,
+                    ReleaseBuffer,
                 };
                 let blkno = pgrx::pg_sys::GetFreeIndexPage(self.raw);
                 if blkno == pgrx::pg_sys::InvalidBlockNumber {
@@ -412,11 +412,11 @@ impl<O: Opaque> RelationWrite for PostgresRelation<O> {
                 }
                 let buf = ReadBuffer(self.raw, blkno);
                 if ConditionalLockBuffer(buf) {
-                    let page = BufferGetPage(buf);
-                    if PageIsNew(page) {
+                    let page = pgrx::BufferGetPage!(buf);
+                    if pgrx::PageIsNew!(page) {
                         break Some(buf);
                     }
-                    let page = page.cast::<PostgresPage<O>>();
+                    let page = page.get().cast::<PostgresPage<O>>();
                     if (*page).get_opaque().is_deleted() {
                         break Some(buf);
                     }
@@ -427,7 +427,7 @@ impl<O: Opaque> RelationWrite for PostgresRelation<O> {
             let buf = if let Some(buf) = buf {
                 buf
             } else {
-                #[cfg(any(feature = "pg14", feature = "pg15"))]
+                #[cfg(feature = "pg15")]
                 {
                     use pgrx::pg_sys::{
                         BUFFER_LOCK_EXCLUSIVE, ExclusiveLock, ForkNumber, LockBuffer,

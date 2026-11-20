@@ -1,0 +1,1 @@
+-- pgrx and PostgreSQL compatibility update; SQL objects and index formats are unchanged.

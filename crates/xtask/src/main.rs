@@ -85,7 +85,7 @@ impl RustcCfg {
     }
     fn ext_suffix(&self, fork: &str) -> Result<&'static str, Box<dyn Error>> {
         if self.is_macos {
-            Ok(if matches!(fork, "pg14" | "pg15") {
+            Ok(if matches!(fork, "pg15") {
                 ".so"
             } else {
                 ".dylib"
@@ -122,6 +122,21 @@ fn pg_config(pg_config: impl AsRef<Path>) -> Result<HashMap<String, String>, Box
         }
     }
     Ok(result)
+}
+
+fn pg_feature(version: &str) -> Result<String, Box<dyn Error>> {
+    let major = version
+        .strip_prefix("PostgreSQL ")
+        .and_then(|v| v.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|v| v.parse::<u32>().ok())
+        .ok_or("PostgreSQL version is invalid.")?;
+    if !(15..=19).contains(&major) {
+        return Err(format!(
+            "PostgreSQL {major} is unsupported: supported versions are PostgreSQL 15–19."
+        )
+        .into());
+    }
+    Ok(format!("pg{major}"))
 }
 
 fn control_file(path: impl AsRef<Path>) -> Result<HashMap<String, String>, Box<dyn Error>> {
@@ -416,20 +431,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 return Err("Environment variable `PG_CONFIG` is not set.".into());
             };
             let pg_config = pg_config(&path)?;
-            let pg_version = {
-                let version = pg_config["VERSION"].clone();
-                if let Some(prefix_stripped) = version.strip_prefix("PostgreSQL ") {
-                    if let Some((stripped, _)) =
-                        prefix_stripped.split_once(|c: char| !c.is_ascii_digit())
-                    {
-                        format!("pg{stripped}",)
-                    } else {
-                        format!("pg{prefix_stripped}",)
-                    }
-                } else {
-                    return Err("PostgreSQL version is invalid.".into());
-                }
-            };
+            let pg_version = pg_feature(&pg_config["VERSION"])?;
             let rustc_cfg = rustc_cfg(&target)?;
             let cargo_metadata = cargo_metadata()?;
             let obj = build(
@@ -504,20 +506,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 return Err("Environment variable `PG_CONFIG` is not set.".into());
             };
             let pg_config = pg_config(&path)?;
-            let pg_version = {
-                let version = pg_config["VERSION"].clone();
-                if let Some(prefix_stripped) = version.strip_prefix("PostgreSQL ") {
-                    if let Some((stripped, _)) =
-                        prefix_stripped.split_once(|c: char| !c.is_ascii_digit())
-                    {
-                        format!("pg{stripped}",)
-                    } else {
-                        format!("pg{prefix_stripped}",)
-                    }
-                } else {
-                    return Err("PostgreSQL version is invalid.".into());
-                }
-            };
+            let pg_version = pg_feature(&pg_config["VERSION"])?;
             clippy(&path, &pg_version, &profile, &target)?;
         }
     }
@@ -526,8 +515,33 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::schema_sql;
+    use super::{pg_feature, schema_sql};
 
+    #[test]
+    fn supported_postgresql_versions() {
+        for (version, feature) in [
+            ("PostgreSQL 15.20", "pg15"),
+            ("PostgreSQL 16.16 (Debian)", "pg16"),
+            ("PostgreSQL 17.12", "pg17"),
+            ("PostgreSQL 18.6 (Homebrew)", "pg18"),
+            ("PostgreSQL 19.0", "pg19"),
+            ("PostgreSQL 19rc2", "pg19"),
+        ] {
+            assert_eq!(pg_feature(version).unwrap(), feature);
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_or_invalid_postgresql_versions() {
+        for version in [
+            "PostgreSQL 14.25",
+            "PostgreSQL 20devel",
+            "PostgreSQL ",
+            "19.0",
+        ] {
+            assert!(pg_feature(version).is_err(), "accepted {version}");
+        }
+    }
     #[test]
     fn schema_ignores_generated_annotations() {
         assert_eq!(

@@ -102,7 +102,7 @@ pub fn prepare(
         index,
         query,
         || {
-            pg_sys::check_for_interrupts!();
+            pgrx::check_for_interrupts();
         },
         crate::index::storage::reader(),
     ));

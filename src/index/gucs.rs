@@ -47,15 +47,6 @@ pub fn init() {
         GucFlags::default(),
     );
     unsafe {
-        #[cfg(feature = "pg14")]
-        pgrx::pg_sys::EmitWarningsOnPlaceholders(c"bm25".as_ptr());
-        #[cfg(any(
-            feature = "pg15",
-            feature = "pg16",
-            feature = "pg17",
-            feature = "pg18",
-            feature = "pg19"
-        ))]
         pgrx::pg_sys::MarkGUCPrefixReserved(c"bm25".as_ptr());
     }
     assert!(crate::is_main());
@@ -63,7 +54,7 @@ pub fn init() {
         (c"bm25.limit", &raw mut BM25_LIMIT_CONFIG),
         (c"bm25.prefilter", &raw mut BM25_PREFILTER_CONFIG),
     ];
-    #[cfg(any(feature = "pg14", feature = "pg15"))]
+    #[cfg(feature = "pg15")]
     unsafe {
         let len = pgrx::pg_sys::GetNumConfigOptions() as usize;
         let arr = pgrx::pg_sys::get_guc_variables();

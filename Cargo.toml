@@ -2,6 +2,7 @@
 name = "vchord_bm25"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 publish = false
 autotests = false
 
@@ -11,7 +12,6 @@ crate-type = ["cdylib", "lib"]
 
 [features]
 default = ["simd/init"]
-pg14 = ["pgrx/pg14"]
 pg15 = ["pgrx/pg15"]
 pg16 = ["pgrx/pg16"]
 pg17 = ["pgrx/pg17"]
@@ -25,7 +25,7 @@ index = { path = "./crates/index" }
 simd = { path = "./crates/simd" }
 
 getrandom.workspace = true
-pgrx = "=0.19.3"
+pgrx = "=0.20.0"
 rand.workspace = true
 serde.workspace = true
 toml = "1.1.8"
@@ -42,8 +42,9 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "1.1.0"
+version = "1.2.0"
 edition = "2024"
+rust-version = "1.99.1"
 
 [workspace.dependencies]
 getrandom = "0.4.3"

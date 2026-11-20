@@ -26,12 +26,12 @@ pub unsafe extern "C-unwind" fn amvacuumcleanup(
     } else {
         stats
     };
-    #[cfg(any(feature = "pg14", feature = "pg15"))]
+    #[cfg(feature = "pg15")]
     let heaprel = std::ptr::null_mut();
     #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18", feature = "pg19"))]
     let heaprel = unsafe { (*info).heaprel };
     let check = || unsafe {
-        #[cfg(any(feature = "pg14", feature = "pg15", feature = "pg16", feature = "pg17"))]
+        #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
         pg_sys::vacuum_delay_point();
         #[cfg(any(feature = "pg18", feature = "pg19"))]
         pg_sys::vacuum_delay_point(false);
@@ -91,7 +91,7 @@ fn _bm25_maintain(index: pg_sys::Oid) -> bool {
     unsafe {
         let heap = pg_sys::IndexGetRelation(index, false);
         let role = pg_sys::GetUserId();
-        #[cfg(any(feature = "pg14", feature = "pg15"))]
+        #[cfg(feature = "pg15")]
         let allowed = pg_sys::pg_class_ownercheck(heap, role);
         #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18", feature = "pg19"))]
         let allowed = pg_sys::object_ownercheck(pg_sys::RelationRelationId, heap, role);
@@ -112,7 +112,7 @@ fn _bm25_maintain(index: pg_sys::Oid) -> bool {
             pgrx::error!("the index is not a bm25 index");
         }
         run(relation.as_ptr(), heap.as_ptr(), true, || {
-            pg_sys::check_for_interrupts!();
+            pgrx::check_for_interrupts();
         })
         .rebuilt
     }
