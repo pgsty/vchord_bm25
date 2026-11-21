@@ -15,7 +15,6 @@ use crate::index::bm25::scanners::{DefaultBuilder, SearchOptions};
 use crate::index::fetcher::*;
 use crate::index::gucs;
 use crate::index::storage::PostgresRelation;
-use pgrx::datum::Internal;
 use pgrx::pg_sys::Datum;
 use std::cell::LazyCell;
 use std::ffi::CStr;
@@ -171,14 +170,16 @@ pub fn init() {
     });
 }
 
-#[pgrx::pg_extern(sql = "")]
-fn _bm25_amhandler(_fcinfo: pgrx::pg_sys::FunctionCallInfo) -> Internal {
-    type T = pgrx::pg_sys::IndexAmRoutine;
-    unsafe {
-        let index_am_routine = pgrx::pg_sys::palloc0(size_of::<T>()) as *mut T;
-        index_am_routine.write(AM_HANDLER);
-        Internal::from(Some(Datum::from(index_am_routine)))
-    }
+#[unsafe(no_mangle)]
+#[doc(hidden)]
+pub extern "C" fn pg_finfo__bm25_amhandler_wrapper() -> &'static pgrx::pg_sys::Pg_finfo_record {
+    &pgrx::pg_sys::Pg_finfo_record { api_version: 1 }
+}
+
+#[unsafe(no_mangle)]
+#[doc(hidden)]
+pub extern "C" fn _bm25_amhandler_wrapper(_: pgrx::pg_sys::FunctionCallInfo) -> Datum {
+    unsafe { crate::index::am_routine(&AM_HANDLER) }
 }
 
 const AM_HANDLER: pgrx::pg_sys::IndexAmRoutine = const {
@@ -530,6 +531,12 @@ pub unsafe extern "C-unwind" fn amgettuple(
     let index = unsafe { PostgresRelation::new((*scan).indexRelation) };
     if let Some((builder, options)) = scanner.pending.take() {
         scanner.prepared = Some(builder.prepare(&index));
+        #[cfg(any(feature = "pg18", feature = "pg19"))]
+        unsafe {
+            if !(*scan).instrument.is_null() {
+                (*(*scan).instrument).nsearches += 1;
+            }
+        }
         scanner.batch = if options.limit == 0 {
             100
         } else {
@@ -568,7 +575,6 @@ pub unsafe extern "C-unwind" fn amgettuple(
         // PostgreSQL resources stay on the stack, including on ERROR cleanup.
         let mut fetcher = LazyCell::new(|| unsafe {
             HeapFetcher::new(
-                (*scan).indexRelation,
                 (*scan).heapRelation,
                 (*scan).xs_snapshot,
                 (*scan).xs_heapfetch,

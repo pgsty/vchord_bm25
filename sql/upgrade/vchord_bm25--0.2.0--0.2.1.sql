@@ -7,8 +7,8 @@
 -- src/datatype/operator_bm25vector.rs:3
 -- vchord_bm25::datatype::operator_bm25vector::_bm25catalog_bm25vector_operator_eq
 CREATE  FUNCTION "_bm25catalog_bm25vector_operator_eq"(
-	"lhs" bm25vector, /* vchord_bm25::datatype::memory_bm25vector::Bm25VectorInput */
-	"rhs" bm25vector /* vchord_bm25::datatype::memory_bm25vector::Bm25VectorInput */
+    "lhs" bm25vector, /* vchord_bm25::datatype::memory_bm25vector::Bm25VectorInput */
+    "rhs" bm25vector /* vchord_bm25::datatype::memory_bm25vector::Bm25VectorInput */
 ) RETURNS bool /* bool */
 IMMUTABLE STRICT PARALLEL SAFE
 LANGUAGE c /* Rust */
@@ -19,8 +19,8 @@ AS 'MODULE_PATHNAME', '_bm25catalog_bm25vector_operator_eq_wrapper';
 -- src/datatype/operator_bm25vector.rs:8
 -- vchord_bm25::datatype::operator_bm25vector::_bm25catalog_bm25vector_operator_neq
 CREATE  FUNCTION "_bm25catalog_bm25vector_operator_neq"(
-	"lhs" bm25vector, /* vchord_bm25::datatype::memory_bm25vector::Bm25VectorInput */
-	"rhs" bm25vector /* vchord_bm25::datatype::memory_bm25vector::Bm25VectorInput */
+    "lhs" bm25vector, /* vchord_bm25::datatype::memory_bm25vector::Bm25VectorInput */
+    "rhs" bm25vector /* vchord_bm25::datatype::memory_bm25vector::Bm25VectorInput */
 ) RETURNS bool /* bool */
 IMMUTABLE STRICT PARALLEL SAFE
 LANGUAGE c /* Rust */

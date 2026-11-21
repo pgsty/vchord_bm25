@@ -36,16 +36,28 @@ unsafe extern "C-unwind" fn rewrite_plan_state(
                 if Some(true) == dirty_check_bm25(index_relation) {
                     use crate::index::bm25::am::Scanner;
 
+                    // `standard_ExecutorStart` has switched back to the caller's
+                    // context. Begin the scan in the query's context, as
+                    // `IndexNext` would; otherwise the Scanner lives as long as
+                    // the caller's context (e.g. an SQL function or SPI loop).
+                    let _switch =
+                        crate::index::MemoryContextSwitch::new((*(*node).ss.ps.state).es_query_cxt);
                     (*node).iss_ScanDesc = pgrx::pg_sys::index_beginscan(
                         (*node).ss.ss_currentRelation,
                         (*node).iss_RelationDesc,
                         (*(*node).ss.ps.state).es_snapshot,
                         #[cfg(any(feature = "pg18", feature = "pg19"))]
-                        std::ptr::null_mut(),
+                        (*node).iss_Instrument,
                         (*node).iss_NumScanKeys,
                         (*node).iss_NumOrderByKeys,
                         #[cfg(feature = "pg19")]
-                        0,
+                        {
+                            if pgrx::pg_sys::ScanRelIsReadOnly(&raw mut (*node).ss) {
+                                pgrx::pg_sys::ScanOptions::SO_HINT_REL_READ_ONLY as _
+                            } else {
+                                pgrx::pg_sys::ScanOptions::SO_NONE as _
+                            }
+                        },
                     );
 
                     let scanner = &mut *((*(*node).iss_ScanDesc).opaque as *mut Scanner);

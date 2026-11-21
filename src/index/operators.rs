@@ -258,10 +258,12 @@ impl Index {
 
 impl Drop for Index {
     fn drop(&mut self) {
-        unsafe {
-            // Cached segment addresses remain tied to this physical index until
-            // the statement/transaction finishes, including concurrent REINDEX.
-            pg_sys::index_close(self.raw, pg_sys::NoLock as _);
+        if crate::index::pg_cleanup_allowed() {
+            unsafe {
+                // Cached segment addresses remain tied to this physical index until
+                // the statement/transaction finishes, including concurrent REINDEX.
+                pg_sys::index_close(self.raw, pg_sys::NoLock as _);
+            }
         }
     }
 }

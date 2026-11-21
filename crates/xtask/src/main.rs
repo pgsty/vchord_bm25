@@ -182,7 +182,7 @@ fn rustc_cfg(target: &str) -> Result<RustcCfg, Box<dyn Error>> {
 fn cargo_metadata() -> Result<CargoMetadata, Box<dyn Error>> {
     let mut command = Command::new("cargo");
     command
-        .args(["metadata", "--format-version", "1"])
+        .args(["metadata", "--format-version", "1", "--locked"])
         .stderr(Stdio::inherit());
     eprintln!("Running {command:?}");
     let command_output = command.output()?;
@@ -204,7 +204,7 @@ fn build(
     target: &str,
 ) -> Result<PathBuf, Box<dyn Error>> {
     let mut command = Command::new("cargo");
-    command.args(["rustc"]);
+    command.args(["rustc", "--locked"]);
     if !matches!(profile, "dev" | "test") {
         command.args(["--crate-type", "cdylib"]);
     }
@@ -388,7 +388,7 @@ fn clippy(
 ) -> Result<(), Box<dyn Error>> {
     let mut command = Command::new("cargo");
     command
-        .args(["clippy"])
+        .args(["clippy", "--locked"])
         .args(["--workspace"])
         .args(["--profile", profile])
         .args(["--target", target])

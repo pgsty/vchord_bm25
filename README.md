@@ -8,7 +8,7 @@
 [![GitHub Stars](https://img.shields.io/github/stars/pgsty/vchord_bm25?style=flat&logo=github&logoColor=black&color=slategray)](https://star-history.com/#pgsty/vchord_bm25&Date)
 [![PostgreSQL: 15-19](https://img.shields.io/badge/PostgreSQL-15--19-%233E668F?style=flat&logo=postgresql&logoColor=white&labelColor=3E668F)](https://pgext.cloud/ext/vchord_bm25)
 
-Native BM25 full-text ranking for PostgreSQL 15–19, using the Block-WeakAnd (WAND) algorithm.
+Native BM25 full-text ranking for PostgreSQL 15–19 on `x86_64` and `aarch64`, using the Block-WeakAnd (WAND) algorithm.
 
 [Documentation](https://vchord.pgsty.com/docs/bm25/) · [Releases](https://github.com/pgsty/vchord_bm25/releases) · [Issues](https://github.com/pgsty/vchord_bm25/issues)
 
@@ -81,7 +81,7 @@ VACUUM documents;
 
 ## Build from Source
 
-Requires Rust 1.99.1+, PostgreSQL development headers, GNU Make, and matching Clang, libclang, and LLVM tools. The project uses pgrx 0.20.0.
+Requires Rust 1.99.1+, PostgreSQL 15–19 development headers on `x86_64` or `aarch64`, GNU Make, and matching Clang, libclang, and LLVM tools. The project uses pgrx 0.20.0.
 
 ```bash
 git clone https://github.com/pgsty/vchord_bm25.git

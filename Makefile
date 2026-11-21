@@ -1,8 +1,7 @@
 export PG_CONFIG ?= pg_config
 PKGLIBDIR := $(shell $(PG_CONFIG) --pkglibdir)
 SHAREDIR := $(shell $(PG_CONFIG) --sharedir)
-CP_R ?= cp -r
-MKDIR_P ?= mkdir -p
+INSTALL ?= install
 DISTVERSION ?= $(shell sed -n "s/^default_version = '\([^']*\)'/\1/p" vchord_bm25.control)
 DISTFILE ?= vchord_bm25-$(DISTVERSION).zip
 
@@ -11,16 +10,15 @@ DISTFILE ?= vchord_bm25-$(DISTVERSION).zip
 all: build
 
 build:
-	cargo run -p xtask -- build
+	cargo run --locked -p xtask -- build
 
 clippy:
-	cargo run -p xtask -- clippy
+	cargo run --locked -p xtask -- clippy
 
 install:
-	$(MKDIR_P) $(DESTDIR)$(PKGLIBDIR) && \
-	$(CP_R) ./build/pkglibdir/. $(DESTDIR)$(PKGLIBDIR) && \
-	$(MKDIR_P) $(DESTDIR)$(SHAREDIR) && \
-	$(CP_R) ./build/sharedir/. $(DESTDIR)$(SHAREDIR)
+	$(INSTALL) -d $(DESTDIR)$(PKGLIBDIR) $(DESTDIR)$(SHAREDIR)/extension && \
+	$(INSTALL) -m 755 ./build/pkglibdir/* $(DESTDIR)$(PKGLIBDIR)/ && \
+	$(INSTALL) -m 644 ./build/sharedir/extension/* $(DESTDIR)$(SHAREDIR)/extension/
 
 uninstall:
 	$(RM) $(wildcard $(DESTDIR)$(PKGLIBDIR)/vchord_bm25.*) && \

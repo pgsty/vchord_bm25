@@ -24,9 +24,9 @@ IMMUTABLE STRICT PARALLEL SAFE LANGUAGE c AS 'MODULE_PATHNAME', '_bm25_amhandler
 -- src/datatype/text_bm25vector.rs:136
 -- vchord_bm25::datatype::text_bm25vector::_bm25catalog_bm25vector_in
 CREATE  FUNCTION "_bm25catalog_bm25vector_in"(
-	"input" cstring, /* &core::ffi::c_str::CStr */
-	"_oid" oid, /* pgrx_pg_sys::submodules::oids::Oid */
-	"_typmod" INT /* i32 */
+    "input" cstring, /* &core::ffi::c_str::CStr */
+    "_oid" oid, /* pgrx_pg_sys::submodules::oids::Oid */
+    "_typmod" INT /* i32 */
 ) RETURNS bm25vector /* vchord_bm25::datatype::memory_bm25vector::Bm25VectorOutput */
 IMMUTABLE STRICT PARALLEL SAFE
 LANGUAGE c /* Rust */
@@ -37,7 +37,7 @@ AS 'MODULE_PATHNAME', '_bm25catalog_bm25vector_in_wrapper';
 -- src/datatype/text_bm25vector.rs:145
 -- vchord_bm25::datatype::text_bm25vector::_bm25catalog_bm25vector_out
 CREATE  FUNCTION "_bm25catalog_bm25vector_out"(
-	"vector" bm25vector /* vchord_bm25::datatype::memory_bm25vector::Bm25VectorInput */
+    "vector" bm25vector /* vchord_bm25::datatype::memory_bm25vector::Bm25VectorInput */
 ) RETURNS cstring /* alloc::ffi::c_str::CString */
 IMMUTABLE STRICT PARALLEL SAFE
 LANGUAGE c /* Rust */
@@ -48,9 +48,9 @@ AS 'MODULE_PATHNAME', '_bm25catalog_bm25vector_out_wrapper';
 -- src/datatype/binary_bm25vector.rs:30
 -- vchord_bm25::datatype::binary_bm25vector::_bm25catalog_bm25vector_recv
 CREATE  FUNCTION "_bm25catalog_bm25vector_recv"(
-	"internal" internal, /* pgrx::datum::internal::Internal */
-	"_oid" oid, /* pgrx_pg_sys::submodules::oids::Oid */
-	"_typmod" INT /* i32 */
+    "internal" internal, /* pgrx::datum::internal::Internal */
+    "_oid" oid, /* pgrx_pg_sys::submodules::oids::Oid */
+    "_typmod" INT /* i32 */
 ) RETURNS bm25vector /* vchord_bm25::datatype::memory_bm25vector::Bm25VectorOutput */
 IMMUTABLE STRICT PARALLEL SAFE
 LANGUAGE c /* Rust */
@@ -61,7 +61,7 @@ AS 'MODULE_PATHNAME', '_bm25catalog_bm25vector_recv_wrapper';
 -- src/datatype/binary_bm25vector.rs:12
 -- vchord_bm25::datatype::binary_bm25vector::_bm25catalog_bm25vector_send
 CREATE  FUNCTION "_bm25catalog_bm25vector_send"(
-	"vector" bm25vector /* vchord_bm25::datatype::memory_bm25vector::Bm25VectorInput */
+    "vector" bm25vector /* vchord_bm25::datatype::memory_bm25vector::Bm25VectorInput */
 ) RETURNS bytea /* vchord_bm25::datatype::bytea::Bytea */
 IMMUTABLE STRICT PARALLEL SAFE
 LANGUAGE c /* Rust */
@@ -72,8 +72,8 @@ AS 'MODULE_PATHNAME', '_bm25catalog_bm25vector_send_wrapper';
 -- src/datatype/functions.rs:11
 -- vchord_bm25::datatype::functions::search_bm25query
 CREATE  FUNCTION "search_bm25query"(
-	"target_vector" bm25vector, /* vchord_bm25::datatype::memory_bm25vector::Bm25VectorInput */
-	"query" bm25query /* pgrx::heap_tuple::PgHeapTuple<pgrx::pgbox::AllocatedByRust> */
+    "target_vector" bm25vector, /* vchord_bm25::datatype::memory_bm25vector::Bm25VectorInput */
+    "query" bm25query /* pgrx::heap_tuple::PgHeapTuple<pgrx::pgbox::AllocatedByRust> */
 ) RETURNS real /* f32 */
 STRICT STABLE PARALLEL SAFE
 LANGUAGE c /* Rust */
@@ -84,8 +84,8 @@ AS 'MODULE_PATHNAME', 'search_bm25query_wrapper';
 -- src/token.rs:81
 -- vchord_bm25::token::unicode_tokenizer_split
 CREATE  FUNCTION "unicode_tokenizer_split"(
-	"text" TEXT, /* &str */
-	"config" bytea /* &[u8] */
+    "text" TEXT, /* &str */
+    "config" bytea /* &[u8] */
 ) RETURNS TEXT[] /* alloc::vec::Vec<alloc::string::String> */
 IMMUTABLE STRICT PARALLEL SAFE
 LANGUAGE c /* Rust */
@@ -147,8 +147,8 @@ $body$ LANGUAGE plpgsql;
 -- requires:
 --   tokenizer_table
 CREATE  FUNCTION "create_tokenizer"(
-	"tokenizer_name" TEXT, /* &str */
-	"config_str" TEXT /* &str */
+    "tokenizer_name" TEXT, /* &str */
+    "config_str" TEXT /* &str */
 ) RETURNS void
 STRICT 
 LANGUAGE c /* Rust */
@@ -161,8 +161,8 @@ AS 'MODULE_PATHNAME', 'create_tokenizer_wrapper';
 -- requires:
 --   tokenizer_table
 CREATE  FUNCTION "tokenize"(
-	"content" TEXT, /* &str */
-	"tokenizer_name" TEXT /* &str */
+    "content" TEXT, /* &str */
+    "tokenizer_name" TEXT /* &str */
 ) RETURNS bm25vector /* vchord_bm25::datatype::memory_bm25vector::Bm25VectorOutput */
 STRICT STABLE PARALLEL SAFE 
 LANGUAGE c /* Rust */
@@ -175,7 +175,7 @@ AS 'MODULE_PATHNAME', 'tokenize_wrapper';
 -- requires:
 --   tokenizer_table
 CREATE  FUNCTION "drop_tokenizer"(
-	"tokenizer_name" TEXT /* &str */
+    "tokenizer_name" TEXT /* &str */
 ) RETURNS void
 STRICT 
 LANGUAGE c /* Rust */
@@ -186,9 +186,9 @@ AS 'MODULE_PATHNAME', 'drop_tokenizer_wrapper';
 -- src/token.rs:406
 -- vchord_bm25::token::unicode_tokenizer_set_target_column_trigger
 CREATE FUNCTION "unicode_tokenizer_set_target_column_trigger"()
-	RETURNS TRIGGER
-	LANGUAGE c
-	AS 'MODULE_PATHNAME', 'unicode_tokenizer_set_target_column_trigger_wrapper';
+    RETURNS TRIGGER
+    LANGUAGE c
+    AS 'MODULE_PATHNAME', 'unicode_tokenizer_set_target_column_trigger_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */

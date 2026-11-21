@@ -8,12 +8,14 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: write
-
 concurrency:
-  group: ${{ github.ref }}-${{ github.workflow }}
-  cancel-in-progress: true
+  # Uploads may already have published immutable assets. Let a publishing run
+  # finish, and serialize later runs for the same release tag.
+  group: ${{ github.workflow }}-${{ github.event.inputs.tag || github.event.release.tag_name || github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
   semver:
@@ -23,9 +25,11 @@ jobs:
       - name: Semver
         id: semver
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
         with:
           script: |
-            const tag = "${{ github.event.inputs.tag }}" || "${{ github.event.release.tag_name }}";
+            const tag = process.env.TAG;
             console.log(`Tag: ${tag}`);
             const r = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/;
             if (!r.test(tag)) {
@@ -44,9 +48,13 @@ jobs:
         arch: ["x86_64", "aarch64"]
     runs-on: ${{ matrix.arch == 'x86_64' && 'ubuntu-22.04' || 'ubuntu-22.04-arm' }}
 
+    permissions:
+      contents: write
+
+    # Warnings are enforced by the Check workflow; a new rustc lint on release
+    # day must not fail an already-validated tag.
     env:
       RUSTUP_AUTO_INSTALL: "0"
-      RUSTFLAGS: "-Dwarnings"
       CARGO_TERM_COLOR: "always"
       RUST_BACKTRACE: "1"
       CLANG_NO_DEFAULT_CONFIG: "1"
@@ -92,7 +100,8 @@ jobs:
         run: |
           test "$(git rev-list -n 1 "refs/tags/${SEMVER}")" = "$(git rev-parse HEAD)"
           echo "Building ${SEMVER} from $(git rev-parse HEAD)"
-          grep -q "default_version = '${{ needs.semver.outputs.SEMVER }}'" vchord_bm25.control || exit 1
+          grep -q "default_version = '${SEMVER}'" vchord_bm25.control || exit 1
+          test -f "sql/install/vchord_bm25--${SEMVER}.sql" || exit 1
           make build
 
       - name: Package (binary package)
@@ -102,8 +111,12 @@ jobs:
           VERSION: ${{ matrix.version }}
         run: |
           ARCH=$(uname -m)
-          (cd ./build && zip -r ~/postgresql-${VERSION}-vchord-bm25_${SEMVER}_${ARCH}-linux-gnu.zip .)
-          gh release upload --clobber $SEMVER ~/postgresql-${VERSION}-vchord-bm25_${SEMVER}_${ARCH}-linux-gnu.zip
+          ASSET=postgresql-${VERSION}-vchord-bm25_${SEMVER}_${ARCH}-linux-gnu.zip
+          cp LICENSE ./build/LICENSE
+          (cd ./build && zip -r ~/${ASSET} .)
+          (cd ~ && sha256sum ${ASSET} > ${ASSET}.sha256)
+          # No --clobber: published assets must never be replaced silently.
+          gh release upload $SEMVER ~/${ASSET} ~/${ASSET}.sha256
 
       - name: Package (debian package)
         env:
@@ -141,12 +154,16 @@ jobs:
           Homepage: https://vchord.pgsty.com/" \
           > ~/debian/DEBIAN/control
           (cd ~/debian && find usr -type f -print0 | xargs -0 md5sum) > ~/debian/DEBIAN/md5sums
-          dpkg-deb --root-owner-group -Zxz --build ~/debian ~/postgresql-${VERSION}-vchord-bm25_${SEMVER}-1_${PLATFORM}.deb
-          gh release upload --clobber $SEMVER ~/postgresql-${VERSION}-vchord-bm25_${SEMVER}-1_${PLATFORM}.deb
+          DEB=postgresql-${VERSION}-vchord-bm25_${SEMVER}-1_${PLATFORM}.deb
+          dpkg-deb --root-owner-group -Zxz --build ~/debian ~/${DEB}
+          (cd ~ && sha256sum ${DEB} > ${DEB}.sha256)
+          gh release upload $SEMVER ~/${DEB} ~/${DEB}.sha256
 
   pgxn:
     runs-on: "ubuntu-latest"
     needs: ["semver", "build"]
+    permissions:
+      contents: write
     env:
       SEMVER: ${{ needs.semver.outputs.SEMVER }}
       PGXN_USERNAME: ${{ secrets.PGXN_USERNAME }}
@@ -167,12 +184,13 @@ jobs:
           test "$(sed -n "s/^default_version = '\([^']*\)'/\1/p" vchord_bm25.control)" = "${SEMVER}"
           make dist
           unzip -l "vchord_bm25-${SEMVER}.zip" | grep -q "vchord_bm25-${SEMVER}/META.json"
+          sha256sum "vchord_bm25-${SEMVER}.zip" > "vchord_bm25-${SEMVER}.zip.sha256"
 
       - name: Attach PGXN source archive
         if: env.PGXN_USERNAME != '' && env.PGXN_PASSWORD != ''
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload --clobber "${SEMVER}" "vchord_bm25-${SEMVER}.zip"
+        run: gh release upload "${SEMVER}" "vchord_bm25-${SEMVER}.zip" "vchord_bm25-${SEMVER}.zip.sha256"
 
       - name: Upload to PGXN
         if: env.PGXN_USERNAME != '' && env.PGXN_PASSWORD != ''

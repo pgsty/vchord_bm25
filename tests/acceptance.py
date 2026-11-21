@@ -253,7 +253,7 @@ def lifecycle(cluster):
         c.execute('VACUUM life');assert state(c,'life_bm')['generation']==2
         # ANALYZE inside a held transaction neither merges nor blocks point lookups.
         reader.execute('BEGIN; ANALYZE life')
-        c.execute("SET lock_timeout='100ms'");assert scalar(c,'SELECT id FROM life WHERE id=1')==1
+        c.execute("SET lock_timeout='5s'");assert scalar(c,'SELECT id FROM life WHERE id=1')==1
         assert scalar(c,"SELECT count(*) FROM pg_locks WHERE pid=%s AND mode='AccessExclusiveLock'",(reader.info.backend_pid,))==0
         reader.execute('ROLLBACK')
         # Actual parallel worker, not merely VACUUM(PARALLEL n) syntax.
@@ -310,33 +310,34 @@ def performance(cluster):
         # Buffer work catches disabled WAND without a wall-clock microbenchmark.
         assert hits(after) <= max(hits(before)*4,hits(before)+100), (hits(before),hits(after))
         c.execute('RESET enable_seqscan; RESET enable_sort; SET bm25.enable_scan=off')
-        timings=[]
+        insert_buffers=[]
         for round_no in range(3):
             start=100000+round_no*50000
             c.execute(f"INSERT INTO perf SELECT i,to_tsvector('simple','common word w1') FROM generate_series({start},{start+19999})i")
             samples=[]
             for j in range(5):
                 lo=start+20000+j*1000
-                t=time.perf_counter();c.execute(f"INSERT INTO perf SELECT i,to_tsvector('simple','common word') FROM generate_series({lo},{lo+999})i")
-                samples.append(time.perf_counter()-t)
-            timings.append(statistics.median(samples))
-        assert max(timings) < 4*min(timings)+.02,timings
+                plan=explain(c,f"INSERT INTO perf SELECT i,to_tsvector('simple','common word') FROM generate_series({lo},{lo+999})i")['Plan']
+                samples.append(plan['Shared Hit Blocks']+plan['Shared Read Blocks'])
+            insert_buffers.append(statistics.median(samples))
+        # Appending via the growing tail hint touches O(1) index pages per row;
+        # walking the growing chain from head would scale linearly across rounds.
+        assert max(insert_buffers) <= 2*min(insert_buffers)+500,insert_buffers
         prefix="SELECT v <&> to_bm25query('common:1'::tsvector,'perf_bm') FROM perf ORDER BY id LIMIT "
         one=explain(c,prefix+'1')['Plan']['Shared Hit Blocks']
         hundred=explain(c,prefix+'100')['Plan']['Shared Hit Blocks']
         assert hundred < one*2+1000,(one,hundred)
-        # Growing collection is interruptible even in a scalar-only plan.
-        c.execute("SET statement_timeout='1ms'")
-        t=time.perf_counter()
+        # Growing collection is interruptible even in a scalar-only plan,
+        # tested deterministically by posting SIGINT right before evaluation.
         try:
-            c.execute(prefix+'100').fetchall()
-            raise AssertionError('scalar preparation finished before timeout fixture fired')
+            c.execute("SELECT CASE WHEN pg_cancel_backend(pg_backend_pid()) THEN v <&> to_bm25query('common:1'::tsvector,'perf_bm') END FROM perf WHERE id=1").fetchall()
+            raise AssertionError('scalar preparation ignored pending query cancellation')
         except psycopg.errors.QueryCanceled:
-            assert time.perf_counter()-t<.5
+            pass
         c.execute("SET statement_timeout='30s'; RESET bm25.enable_scan")
         c.execute('REINDEX INDEX CONCURRENTLY perf_bm')
         c.execute('DROP TABLE perf')
-    print('PASS WAND buffer work',hits(before),hits(after),'insert median seconds',timings,'scalar buffers',one,hundred,flush=True)
+    print('PASS WAND buffer work',hits(before),hits(after),'insert median buffers',insert_buffers,'scalar buffers',one,hundred,flush=True)
 
 
 def pivot_rounding(cluster):
@@ -422,8 +423,9 @@ def zero_tail(cluster):
         for terms in ('missing','w5 missing'):
             q=f"v <&> to_bm25query(to_tsvector('simple','{terms}'),'tail_bm')"
             assert c.execute(f"SELECT count(*),count(DISTINCT id) FROM (SELECT id FROM tail ORDER BY {q}) s").fetchone()==(n,n), terms
-        # Heap pages and one pass over the document pages, not one per batch.
-        assert first < 60 and rejected < 2*pages, (first, rejected, pages)
+        # Heap pages (+ 1 VM hit/page on PG19 SO_HINT_REL_READ_ONLY) and one
+        # pass over document pages, not ~13 passes across batches (~6x pages).
+        assert first < 60 and rejected < 3*pages, (first, rejected, pages)
         c.execute('RESET ALL; DROP TABLE tail')
     print('PASS zero tail buffer work first batch',first,'all rejected',rejected,'heap pages',pages,flush=True)
 

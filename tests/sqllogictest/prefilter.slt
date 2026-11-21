@@ -59,5 +59,88 @@ SELECT COUNT(1) FROM results;
 ----
 5
 
+# Error during prefilter evaluation (`1 / id > 0` with both passing and failing
+# rows) must unwind cleanly without leaking slots, buffer pins, or contexts.
+statement ok
+INSERT INTO documents (id, passage, condition) VALUES
+(0, 'PostgreSQL BM25 full-text search relevance ranking.', TRUE);
+
+statement error division by zero
+SELECT id
+FROM documents
+WHERE 1 / id > 0
+ORDER BY to_tsvector('english', passage) <&> to_bm25query(to_tsvector('english', 'PostgreSQL'), 'documents_passage_bm25')
+LIMIT 10;
+
+statement ok
+BEGIN;
+
+statement ok
+SAVEPOINT prefilter_err;
+
+statement error division by zero
+SELECT id
+FROM documents
+WHERE 1 / id > 0
+ORDER BY to_tsvector('english', passage) <&> to_bm25query(to_tsvector('english', 'PostgreSQL'), 'documents_passage_bm25')
+LIMIT 10;
+
+statement ok
+ROLLBACK TO SAVEPOINT prefilter_err;
+
+query I
+SELECT COUNT(1) FROM (
+  SELECT id
+  FROM documents
+  WHERE id > 0 AND condition = TRUE
+  ORDER BY to_tsvector('english', passage) <&> to_bm25query(to_tsvector('english', 'PostgreSQL'), 'documents_passage_bm25')
+  LIMIT 10
+) AS ok_after_rollback;
+----
+5
+
+statement ok
+DECLARE prefilter_bad NO SCROLL CURSOR FOR
+  SELECT id
+  FROM documents
+  WHERE 1 / id > 0
+  ORDER BY to_tsvector('english', passage) <&> to_bm25query(to_tsvector('english', 'PostgreSQL'), 'documents_passage_bm25')
+  LIMIT 10;
+
+statement ok
+SAVEPOINT cursor_err;
+
+statement error division by zero
+FETCH 1 FROM prefilter_bad;
+
+statement ok
+ROLLBACK TO SAVEPOINT cursor_err;
+
+statement ok
+CLOSE prefilter_bad;
+
+statement ok
+COMMIT;
+
+query I
+SELECT COUNT(1) FROM (
+  SELECT id
+  FROM documents
+  WHERE id > 0 AND condition = TRUE
+  ORDER BY to_tsvector('english', passage) <&> to_bm25query(to_tsvector('english', 'PostgreSQL'), 'documents_passage_bm25')
+  LIMIT 10
+) AS ok_after_commit;
+----
+5
+
+statement ok
+RESET bm25.prefilter;
+
+statement ok
+RESET "bm25.limit";
+
+statement ok
+RESET enable_seqscan;
+
 statement ok
 DROP TABLE documents;

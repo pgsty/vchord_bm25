@@ -127,6 +127,68 @@ FROM cost_documents WHERE id = 1;
 ----
 0
 
+# PG18+ EXPLAIN ANALYZE reports Index Searches accurately across batches and rescans.
+statement ok
+DO $$
+DECLARE
+    line text;
+    plan_text text := '';
+BEGIN
+    IF current_setting('server_version_num')::int >= 180000 THEN
+        PERFORM set_config('bm25.limit', '3', true);
+        FOR line IN EXECUTE $ex$
+            EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+            SELECT id FROM cost_documents
+            ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'search'), 'cost_documents_bm25')
+            LIMIT 10
+        $ex$ LOOP
+            plan_text := plan_text || line || E'\n';
+        END LOOP;
+        IF strpos(plan_text, 'Index Searches: 1') = 0 THEN
+            RAISE EXCEPTION 'expected Index Searches: 1 in EXPLAIN output: %', plan_text;
+        END IF;
+        plan_text := '';
+        FOR line IN EXECUTE $ex$
+            EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+            SELECT results.id
+            FROM (VALUES ('search'), ('term')) AS q(word)
+            CROSS JOIN LATERAL (
+                SELECT id FROM cost_documents
+                ORDER BY vector <&> to_bm25query(to_tsvector('simple', q.word), 'cost_documents_bm25')
+                LIMIT 3
+            ) AS results
+        $ex$ LOOP
+            plan_text := plan_text || line || E'\n';
+        END LOOP;
+        IF strpos(plan_text, 'Index Searches: 2') = 0 THEN
+            RAISE EXCEPTION 'expected Index Searches: 2 in EXPLAIN output: %', plan_text;
+        END IF;
+    END IF;
+END
+$$;
+
+# Repeated SQL-function BM25 index scans execute cleanly in per-execution query contexts.
+statement ok
+CREATE FUNCTION bm25_top1_id(term text) RETURNS integer LANGUAGE plpgsql STABLE AS $$
+DECLARE
+    top_id integer;
+BEGIN
+    SELECT id INTO top_id
+    FROM cost_documents
+    ORDER BY vector <&> to_bm25query(to_tsvector('simple', term), 'cost_documents_bm25')
+    LIMIT 1;
+    RETURN top_id;
+END
+$$;
+
+query I
+SELECT count(*) FROM generate_series(1, 50) AS g WHERE bm25_top1_id('search') IS NOT NULL;
+----
+50
+
+statement ok
+DROP FUNCTION bm25_top1_id(text);
+
 statement ok
 DROP FUNCTION bm25_test_plan(text);
 

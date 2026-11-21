@@ -188,8 +188,10 @@ impl<Opaque> Deref for PostgresBufferReadGuard<Opaque> {
 
 impl<Opaque> Drop for PostgresBufferReadGuard<Opaque> {
     fn drop(&mut self) {
-        unsafe {
-            pgrx::pg_sys::UnlockReleaseBuffer(self.buf);
+        if crate::index::pg_cleanup_allowed() {
+            unsafe {
+                pgrx::pg_sys::UnlockReleaseBuffer(self.buf);
+            }
         }
     }
 }

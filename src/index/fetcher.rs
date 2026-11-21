@@ -6,18 +6,13 @@
 // Copyright (c) 2026 PGSTY PTE. LTD.
 // Maintained by Ruohang Feng @ PGSTY (rh@vonng.com)
 
-use pgrx::pg_sys::{BlockIdData, Datum, ItemPointerData};
+use pgrx::pg_sys::{BlockIdData, ItemPointerData};
 use std::cell::LazyCell;
 use std::ops::DerefMut;
 use std::ptr::NonNull;
 
-pub trait FilterableTuple: Tuple {
+pub trait FilterableTuple {
     fn filter(&mut self) -> bool;
-}
-
-pub trait Tuple {
-    #[expect(dead_code)]
-    fn build(&mut self) -> (&[Datum; 32], &[bool; 32]);
 }
 
 pub trait Fetcher {
@@ -40,40 +35,26 @@ impl<T: Fetcher, F: FnOnce() -> T> Fetcher for LazyCell<T, F> {
 }
 
 pub struct HeapFetcher {
-    index_info: *mut pgrx::pg_sys::IndexInfo,
-    estate: *mut pgrx::pg_sys::EState,
-    econtext: *mut pgrx::pg_sys::ExprContext,
     heap_relation: pgrx::pg_sys::Relation,
     snapshot: pgrx::pg_sys::Snapshot,
     heapfetch: *mut pgrx::pg_sys::IndexFetchTableData,
     slot: *mut pgrx::pg_sys::TupleTableSlot,
-    values: [Datum; 32],
-    is_nulls: [bool; 32],
     hack: *mut pgrx::pg_sys::IndexScanState,
 }
 
 impl HeapFetcher {
     pub unsafe fn new(
-        index_relation: pgrx::pg_sys::Relation,
         heap_relation: pgrx::pg_sys::Relation,
         snapshot: pgrx::pg_sys::Snapshot,
         heapfetch: *mut pgrx::pg_sys::IndexFetchTableData,
         hack: *mut pgrx::pg_sys::IndexScanState,
     ) -> Self {
         unsafe {
-            let index_info = pgrx::pg_sys::BuildIndexInfo(index_relation);
-            let estate = pgrx::pg_sys::CreateExecutorState();
-            let econtext = pgrx::pg_sys::MakePerTupleExprContext(estate);
             Self {
-                index_info,
-                estate,
-                econtext,
                 heap_relation,
                 snapshot,
                 heapfetch,
                 slot: pgrx::pg_sys::table_slot_create(heap_relation, std::ptr::null_mut()),
-                values: [Datum::null(); 32],
-                is_nulls: [true; 32],
                 hack,
             }
         }
@@ -82,11 +63,10 @@ impl HeapFetcher {
 
 impl Drop for HeapFetcher {
     fn drop(&mut self) {
-        unsafe {
-            pgrx::pg_sys::MemoryContextReset((*self.econtext).ecxt_per_tuple_memory);
-            // free common resources
-            pgrx::pg_sys::ExecDropSingleTupleTableSlot(self.slot);
-            pgrx::pg_sys::FreeExecutorState(self.estate);
+        if crate::index::pg_cleanup_allowed() {
+            unsafe {
+                pgrx::pg_sys::ExecDropSingleTupleTableSlot(self.slot);
+            }
         }
     }
 }
@@ -153,20 +133,12 @@ pub struct HeapTuple<'a> {
     this: &'a mut HeapFetcher,
 }
 
-impl Tuple for HeapTuple<'_> {
-    fn build(&mut self) -> (&[Datum; 32], &[bool; 32]) {
-        unsafe {
-            let this = &mut self.this;
-            (*this.econtext).ecxt_scantuple = this.slot;
-            pgrx::pg_sys::MemoryContextReset((*this.econtext).ecxt_per_tuple_memory);
-            pgrx::pg_sys::FormIndexDatum(
-                this.index_info,
-                this.slot,
-                this.estate,
-                this.values.as_mut_ptr(),
-                this.is_nulls.as_mut_ptr(),
-            );
-            (&this.values, &this.is_nulls)
+impl Drop for HeapTuple<'_> {
+    fn drop(&mut self) {
+        if crate::index::pg_cleanup_allowed() {
+            unsafe {
+                pgrx::pg_sys::ExecClearTuple(self.this.slot);
+            }
         }
     }
 }
@@ -174,30 +146,31 @@ impl Tuple for HeapTuple<'_> {
 impl FilterableTuple for HeapTuple<'_> {
     fn filter(&mut self) -> bool {
         unsafe {
+            use pgrx::datum::FromDatum;
             use pgrx::pg_sys::ffi::pg_guard_ffi_boundary;
             let this = &mut self.this;
             if !this.hack.is_null() {
                 if let Some(qual) = NonNull::new((*this.hack).ss.ps.qual) {
-                    use pgrx::datum::FromDatum;
-                    use pgrx::memcxt::PgMemoryContexts;
                     assert!(qual.as_ref().flags & pgrx::pg_sys::EEO_FLAG_IS_QUAL as u8 != 0);
                     let evalfunc = qual.as_ref().evalfunc.expect("no evalfunc for qual");
                     if !(*this.hack).ss.ps.ps_ExprContext.is_null() {
                         let econtext = (*this.hack).ss.ps.ps_ExprContext;
                         (*econtext).ecxt_scantuple = this.slot;
                         pgrx::pg_sys::MemoryContextReset((*econtext).ecxt_per_tuple_memory);
-                        let result = PgMemoryContexts::For((*econtext).ecxt_per_tuple_memory)
-                            .switch_to(|_| {
-                                let mut is_null = true;
-                                #[allow(
-                                    ffi_unwind_calls,
-                                    reason = "protected by pg_guard_ffi_boundary"
-                                )]
-                                let datum = pg_guard_ffi_boundary(|| {
-                                    evalfunc(qual.as_ptr(), econtext, &mut is_null)
-                                });
-                                bool::from_datum(datum, is_null)
+                        let result = {
+                            let _switch = crate::index::MemoryContextSwitch::new(
+                                (*econtext).ecxt_per_tuple_memory,
+                            );
+                            let mut is_null = true;
+                            #[allow(
+                                ffi_unwind_calls,
+                                reason = "protected by pg_guard_ffi_boundary"
+                            )]
+                            let datum = pg_guard_ffi_boundary(|| {
+                                evalfunc(qual.as_ptr(), econtext, &mut is_null)
                             });
+                            bool::from_datum(datum, is_null)
+                        };
                         if result != Some(true) {
                             return false;
                         }
