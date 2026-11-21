@@ -46,7 +46,15 @@ unsafe extern "C-unwind" fn rewrite_plan_state(
                         (*node).ss.ss_currentRelation,
                         (*node).iss_RelationDesc,
                         (*(*node).ss.ps.state).es_snapshot,
-                        #[cfg(any(feature = "pg18", feature = "pg19"))]
+                        #[cfg(feature = "pg18")]
+                        {
+                            if (*(*node).ss.ps.state).es_instrument != 0 {
+                                &raw mut (*node).iss_Instrument
+                            } else {
+                                std::ptr::null_mut()
+                            }
+                        },
+                        #[cfg(feature = "pg19")]
                         (*node).iss_Instrument,
                         (*node).iss_NumScanKeys,
                         (*node).iss_NumOrderByKeys,
