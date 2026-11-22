@@ -192,7 +192,7 @@ const AM_HANDLER: pgrx::pg_sys::IndexAmRoutine = const {
 
     #[cfg(any(feature = "pg17", feature = "pg18", feature = "pg19"))]
     {
-        am_routine.amcanbuildparallel = false;
+        am_routine.amcanbuildparallel = true;
     }
 
     // Index access methods that set `amoptionalkey` to `false`
@@ -325,14 +325,31 @@ pub unsafe extern "C-unwind" fn amcostestimate(
                 }
             }
         }
-        // do not use index, if there are no orderbys or clauses
-        if (*path).indexorderbys.is_null() || !target_matches || !gucs::bm25_enable_scan() {
+        // Without a matching BM25 ORDER BY key `amrescan` rejects the scan, and
+        // this index cannot return tuple data for index-only scans. Keep the
+        // cost finite so `cost_index()` never computes `inf - inf = NaN`.
+        let unusable = (*path).indexorderbys.is_null()
+            || !target_matches
+            || (*path).path.pathtype == pgrx::pg_sys::NodeTag::T_IndexOnlyScan;
+        if unusable {
             #[cfg(any(feature = "pg18", feature = "pg19"))]
             {
-                (*path).path.disabled_nodes = 2;
+                (*path).path.disabled_nodes += 2;
             }
-            *index_startup_cost = f64::INFINITY;
-            *index_total_cost = f64::INFINITY;
+            *index_startup_cost = crate::index::UNUSABLE_PATH_COST;
+            *index_total_cost = crate::index::UNUSABLE_PATH_COST;
+            *index_selectivity = 0.0;
+            *index_correlation = 0.0;
+            *index_pages = 1.0;
+            return;
+        }
+        if !gucs::bm25_enable_scan() {
+            #[cfg(any(feature = "pg18", feature = "pg19"))]
+            {
+                (*path).path.disabled_nodes += 1;
+            }
+            *index_startup_cost = pgrx::pg_sys::disable_cost;
+            *index_total_cost = pgrx::pg_sys::disable_cost;
             *index_selectivity = 0.0;
             *index_correlation = 0.0;
             *index_pages = 1.0;
@@ -519,6 +536,9 @@ pub unsafe extern "C-unwind" fn amgettuple(
     if direction != pgrx::pg_sys::ScanDirection::ForwardScanDirection {
         pgrx::error!("vector search without a forward scan direction is not supported");
     }
+    // `index_getnext_slot` loops without checking interrupts while returned
+    // heap tuples are invisible; no buffer lock is held here.
+    pgrx::check_for_interrupts();
     // https://www.postgresql.org/docs/current/index-locking.html
     // If heap entries referenced physical pointers are deleted before
     // they are consumed by PostgreSQL, PostgreSQL will received wrong
@@ -531,8 +551,9 @@ pub unsafe extern "C-unwind" fn amgettuple(
     let index = unsafe { PostgresRelation::new((*scan).indexRelation) };
     if let Some((builder, options)) = scanner.pending.take() {
         scanner.prepared = Some(builder.prepare(&index));
-        #[cfg(any(feature = "pg18", feature = "pg19"))]
         unsafe {
+            crate::index::count_index_scan((*scan).indexRelation);
+            #[cfg(any(feature = "pg18", feature = "pg19"))]
             if !(*scan).instrument.is_null() {
                 (*(*scan).instrument).nsearches += 1;
             }

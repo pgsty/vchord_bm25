@@ -158,7 +158,9 @@ pub unsafe extern "C-unwind" fn ambuild(
                     heap_relation,
                     leader.tablescandesc,
                     #[cfg(feature = "pg19")]
-                    0,
+                    {
+                        pgrx::pg_sys::ScanOptions::SO_NONE as _
+                    },
                 ),
                 (*leader.bm25shared).seed,
                 parse_path(leader.path),
@@ -612,7 +614,9 @@ pub unsafe extern "C-unwind" fn bm25_parallel_build_main(
                 heap_relation,
                 tablescandesc,
                 #[cfg(feature = "pg19")]
-                0,
+                {
+                    pgrx::pg_sys::ScanOptions::SO_NONE as _
+                },
             ),
             (*bm25shared).seed,
             parse_path(path),

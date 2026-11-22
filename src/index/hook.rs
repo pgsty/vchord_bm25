@@ -110,7 +110,9 @@ unsafe extern "C-unwind" fn executor_start(
         }
         pgrx::memcxt::PgMemoryContexts::For((*(*query_desc).estate).es_query_cxt)
             .leak_and_drop_on_delete(lease);
-        pg_guard_ffi_boundary(|| rewrite_plan_state((*query_desc).planstate, null_mut()));
+        if eflags & pgrx::pg_sys::EXEC_FLAG_EXPLAIN_ONLY as core::ffi::c_int == 0 {
+            pg_guard_ffi_boundary(|| rewrite_plan_state((*query_desc).planstate, null_mut()));
+        }
     }
 }
 

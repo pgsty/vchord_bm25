@@ -22,6 +22,33 @@ pub fn init() {
     bm25::am::init();
 }
 
+/// Cost given to index paths the access method cannot execute (no matching
+/// BM25 ORDER BY key, multiple ORDER BY keys, or index-only scans). Finite on
+/// purpose: `inf - inf` in PostgreSQL's `cost_index()` yields NaN.
+pub const UNUSABLE_PATH_COST: f64 = 1.0e30;
+
+/// Mirror PostgreSQL's `pgstat_count_index_scan(rel)` macro so
+/// `pg_stat_user_indexes.idx_scan` tracks index searches across PG 15–19.
+#[inline]
+pub(crate) unsafe fn count_index_scan(rel: pgrx::pg_sys::Relation) {
+    unsafe {
+        if (*rel).pgstat_info.is_null() {
+            if !(*rel).pgstat_enabled {
+                return;
+            }
+            pgrx::pg_sys::pgstat_assoc_relation(rel);
+        }
+        #[cfg(feature = "pg15")]
+        {
+            (*(*rel).pgstat_info).t_counts.t_numscans += 1;
+        }
+        #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18", feature = "pg19"))]
+        {
+            (*(*rel).pgstat_info).counts.numscans += 1;
+        }
+    }
+}
+
 /// Whether a destructor may release PostgreSQL-managed resources directly.
 ///
 /// During panic unwinding (after PostgreSQL `ERROR`) or backend exit,

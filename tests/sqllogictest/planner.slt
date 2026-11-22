@@ -82,10 +82,24 @@ SELECT count(*) FROM no_order;
 statement ok
 RESET enable_seqscan;
 
+# Zero-column queries must never choose an Index Only Scan (bm25 cannot return tuple data).
+query II
+SELECT (bm25_test_plan($q$
+SELECT 1 FROM cost_documents ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'search'), 'cost_documents_bm25') LIMIT 5
+$q$)::text LIKE '%"Node Type": "Index Scan"%')::int,
+(bm25_test_plan($q$
+SELECT 1 FROM cost_documents ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'search'), 'cost_documents_bm25') LIMIT 5
+$q$)::text NOT LIKE '%Index Only Scan%')::int;
+----
+1 1
+
 # Two ORDER BY keys cannot be served by one BM25 scan; never plan it, even
-# when sequential scans are disabled.
+# when both sequential scans and sorts are disabled, and never produce NaN costs.
 statement ok
 SET enable_seqscan = off;
+
+statement ok
+SET enable_sort = off;
 
 query I
 SELECT count(*) FROM (
@@ -96,6 +110,19 @@ SELECT count(*) FROM (
 ) AS ranked;
 ----
 5
+
+query I
+SELECT (bm25_test_plan($q$
+SELECT id FROM cost_documents
+ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'search'), 'cost_documents_bm25'),
+         vector <&> to_bm25query(to_tsvector('simple', 'term'), 'cost_documents_bm25')
+LIMIT 5
+$q$)::text !~* 'nan|infinity')::int;
+----
+1
+
+statement ok
+RESET enable_sort;
 
 statement ok
 RESET enable_seqscan;
@@ -166,6 +193,48 @@ BEGIN
     END IF;
 END
 $$;
+
+# pg_stat_user_indexes.idx_scan tracks BM25 searches accurately across batches and rescans on PG 15-19.
+statement ok
+DO $$
+DECLARE
+    before_scans bigint;
+    after_single bigint;
+    after_lateral bigint;
+BEGIN
+    PERFORM set_config('bm25.limit', '3', true);
+    before_scans := pg_stat_get_xact_numscans('cost_documents_bm25'::regclass);
+    PERFORM id FROM cost_documents
+    ORDER BY vector <&> to_bm25query(to_tsvector('simple', 'search'), 'cost_documents_bm25')
+    LIMIT 10;
+    after_single := pg_stat_get_xact_numscans('cost_documents_bm25'::regclass);
+    IF after_single - before_scans <> 1 THEN
+        RAISE EXCEPTION 'expected +1 xact numscans for single multi-batch scan, got %', after_single - before_scans;
+    END IF;
+    PERFORM results.id
+    FROM (VALUES ('search'), ('term')) AS q(word)
+    CROSS JOIN LATERAL (
+        SELECT id FROM cost_documents
+        ORDER BY vector <&> to_bm25query(to_tsvector('simple', q.word), 'cost_documents_bm25')
+        LIMIT 3
+    ) AS results;
+    after_lateral := pg_stat_get_xact_numscans('cost_documents_bm25'::regclass);
+    IF after_lateral - after_single <> 2 THEN
+        RAISE EXCEPTION 'expected +2 xact numscans for lateral rescan, got %', after_lateral - after_single;
+    END IF;
+END
+$$;
+
+statement ok
+SELECT pg_stat_force_next_flush();
+
+statement ok
+SELECT pg_stat_clear_snapshot();
+
+query I
+SELECT (pg_stat_get_numscans('cost_documents_bm25'::regclass) >= 3)::int;
+----
+1
 
 # Repeated SQL-function BM25 index scans execute cleanly in per-execution query contexts.
 statement ok

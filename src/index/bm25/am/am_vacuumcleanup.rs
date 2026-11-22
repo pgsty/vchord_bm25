@@ -108,8 +108,24 @@ fn _bm25_maintain(index: pg_sys::Oid) -> bool {
         }
         let heap = pgrx::PgRelation::with_lock(heap, pg_sys::ShareUpdateExclusiveLock as _);
         let relation = pgrx::PgRelation::with_lock(index, pg_sys::AccessShareLock as _);
-        if (*(*relation.as_ptr()).rd_rel).relam != pg_sys::get_am_oid(c"bm25".as_ptr(), false) {
+        let rel = &*(*relation.as_ptr()).rd_rel;
+        if rel.relkind != pg_sys::RELKIND_INDEX as std::ffi::c_char {
+            let name = std::ffi::CStr::from_ptr(rel.relname.data.as_ptr()).to_string_lossy();
+            pgrx::error!("the relation \"{name}\" is not an index");
+        }
+        if rel.relam != pg_sys::get_am_oid(c"bm25".as_ptr(), false) {
             pgrx::error!("the index is not a bm25 index");
+        }
+        if !(*(*relation.as_ptr()).rd_index).indisvalid {
+            let name = std::ffi::CStr::from_ptr(rel.relname.data.as_ptr()).to_string_lossy();
+            pg_sys::panic::ErrorReport::new(
+                pgrx::PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                format!("index \"{name}\" is not valid"),
+                "_bm25_maintain",
+            )
+            .set_hint("REINDEX the index or drop it.")
+            .report(pg_sys::elog::PgLogLevel::ERROR);
+            unreachable!();
         }
         run(relation.as_ptr(), heap.as_ptr(), true, || {
             pgrx::check_for_interrupts();

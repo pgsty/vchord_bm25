@@ -124,7 +124,7 @@ jobs:
           SEMVER: ${{ needs.semver.outputs.SEMVER }}
           VERSION: ${{ matrix.version }}
         run: |
-          make DESTDIR="~/debian" install
+          make DESTDIR="$HOME/debian" install
           mkdir -p ~/debian/usr/share/doc/postgresql-${VERSION}-vchord-bm25/
           echo "Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
           Upstream-Name: vchord_bm25
