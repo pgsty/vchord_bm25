@@ -291,6 +291,7 @@ pub unsafe extern "C-unwind" fn ambuild(
                 let shared = leader.bm25shared;
                 pgrx::pg_sys::SpinLockAcquire(&raw mut (*shared).mutex);
                 let counts = ((*shared).heap_tuples, (*shared).index_tuples);
+                (*index_info).ii_BrokenHotChain |= (*shared).worker_broken_hot_chain;
                 pgrx::pg_sys::SpinLockRelease(&raw mut (*shared).mutex);
                 counts
             };
@@ -360,6 +361,7 @@ struct Bm25Shared {
     barrier_leave_1: bool,
     barrier_enter_2: i32,
     barrier_leave_2: bool,
+    worker_broken_hot_chain: bool,
     /// heap tuples counted by the table AM, summed over participants
     heap_tuples: f64,
     /// records written (including NULL documents), summed over participants
@@ -478,6 +480,7 @@ impl Bm25Leader {
                 barrier_leave_1: false,
                 barrier_enter_2: 0,
                 barrier_leave_2: false,
+                worker_broken_hot_chain: false,
                 heap_tuples: 0.0,
                 index_tuples: 0,
             });
@@ -660,6 +663,7 @@ pub unsafe extern "C-unwind" fn bm25_parallel_build_main(
                 pgrx::pg_sys::SpinLockAcquire(&raw mut (*shared).mutex);
                 (*shared).heap_tuples += heap_tuples;
                 (*shared).index_tuples += index_tuples;
+                (*shared).worker_broken_hot_chain |= (*index_info).ii_BrokenHotChain;
                 (*shared).barrier_enter_1 += 1;
                 pgrx::pg_sys::SpinLockRelease(&raw mut (*shared).mutex);
                 pgrx::pg_sys::ConditionVariableBroadcast(

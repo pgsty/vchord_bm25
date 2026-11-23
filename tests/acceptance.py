@@ -16,6 +16,7 @@ The recovery option deliberately kills only backends of its own temporary cluste
 import argparse
 import bisect
 import collections
+from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import json
 import math
@@ -298,6 +299,103 @@ def wait_for(fn, description, timeout=45):
 
 def explain(c, sql):
     return scalar(c,'EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) '+sql)[0]
+
+
+def parallel_hot_visibility(cluster):
+    with cluster.connect() as builder, cluster.connect() as observer, cluster.connect() as reader:
+        leader = builder.info.backend_pid
+        observer.execute(f"""
+            CREATE FUNCTION build_gate(id integer) RETURNS boolean
+            LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE AS $$
+            BEGIN
+                IF id < 4000 THEN
+                    PERFORM pg_advisory_xact_lock_shared({leader},
+                        CASE WHEN pg_backend_pid() = {leader} THEN 1 ELSE 2 END);
+                    PERFORM pg_advisory_xact_lock_shared({leader}, pg_backend_pid());
+                ELSIF id = 12000 THEN
+                    PERFORM pg_advisory_xact_lock_shared({leader}, 3);
+                END IF;
+                RETURN true;
+            END $$""")
+        builder.execute("SET max_parallel_maintenance_workers = 2; SET max_parallel_workers = 2;"
+                        "SET synchronize_seqscans = off; SET statement_timeout = '90s'")
+        for connection in (reader, observer):
+            connection.prepare_threshold = None
+            connection.execute("SET jit = off")
+
+        def check_snapshot(connection, use_index, winner):
+            query = """SELECT id, body <&> to_bm25query('rare'::tsvector, 'build_bm') AS score
+                       FROM build_docs WHERE build_gate(id) ORDER BY score LIMIT 1"""
+            connection.execute("SET enable_seqscan = off; SET enable_sort = off; SET enable_indexscan = on")
+            plan = '\n'.join(row[0] for row in connection.execute('EXPLAIN (COSTS OFF) ' + query))
+            top = connection.execute(query).fetchone()
+            connection.execute("SET enable_seqscan = on; SET enable_sort = on; SET enable_indexscan = off")
+            heap_plan = '\n'.join(row[0] for row in connection.execute('EXPLAIN (COSTS OFF) ' + query))
+            expected = connection.execute(query).fetchone()
+            assert 'Seq Scan on build_docs' in heap_plan and expected[0] == winner, (heap_plan, expected)
+            assert top == expected, (top, expected, plan)
+            assert ('Index Scan using build_bm' in plan) == use_index, plan
+            return top[0]
+
+        for mode, worker_scans_target, hot in (
+            ('worker HOT', True, True),
+            ('leader HOT', False, True),
+            ('parallel clean', True, False),
+        ):
+            observer.execute("""
+                CREATE TABLE build_docs(id integer, body tsvector, pad text)
+                    WITH (fillfactor = 65, parallel_workers = 2);
+                INSERT INTO build_docs
+                SELECT id, CASE WHEN id = 1 THEN 'rare:1 pad:2,3,4'::tsvector
+                                WHEN id = 12000 THEN 'rare:1,2,3,4'::tsvector
+                                ELSE 'common:1'::tsvector END, repeat('p', 300)
+                FROM generate_series(1, 12000) id""")
+            reader.execute('BEGIN ISOLATION LEVEL REPEATABLE READ')
+            assert scalar(reader, 'SELECT count(*) FROM build_docs') == 12000
+            if hot:
+                with observer.transaction():
+                    observer.execute("UPDATE build_docs SET body = 'common:1' WHERE id = 12000")
+                    assert scalar(observer, "SELECT pg_stat_get_xact_tuples_hot_updated('build_docs'::regclass)") == 1
+
+            observer.execute('SELECT pg_advisory_lock(%s, 1), pg_advisory_lock(%s, 2)', (leader, leader))
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                build = executor.submit(builder.execute,
+                    'CREATE INDEX build_bm ON build_docs USING bm25(body bm25_ops) WHERE build_gate(id)')
+
+                def wait_for_build(condition, description):
+                    def poll():
+                        if build.done():
+                            build.result()
+                            raise AssertionError(f'{mode}: build finished before {description}')
+                        return condition()
+                    return wait_for(poll, f'{mode}: {description}')
+
+                try:
+                    wait_for_build(lambda: scalar(observer, """
+                        SELECT count(*) FROM pg_stat_activity WHERE (pid = %s OR leader_pid = %s)
+                        AND wait_event = 'advisory'""", (leader, leader)) == 3, 'leader and both workers')
+                    observer.execute("""
+                        SELECT pg_advisory_lock(%s, min(pid)) FROM pg_stat_activity WHERE leader_pid = %s""",
+                        (leader, leader))
+                    observer.execute('SELECT pg_advisory_unlock(%s, %s)', (leader, 2 if worker_scans_target else 1))
+                    scanner = wait_for_build(lambda: scalar(observer, """
+                        SELECT min(pid) FROM pg_locks WHERE locktype = 'advisory' AND classid = %s
+                        AND objid = 3 AND objsubid = 2 AND granted""", (leader,)), 'target row')
+                    assert (scanner != leader) == worker_scans_target, (mode, scanner, leader)
+                    wait_for_build(lambda: scalar(observer, """
+                        SELECT wait_event = 'ParallelCreateIndexScan' FROM pg_stat_activity WHERE pid = %s""",
+                        (scanner,)), 'target reader to publish its scan result')
+                finally:
+                    observer.execute('SELECT pg_advisory_unlock_all()')
+                build.result()
+            flag = scalar(observer, "SELECT indcheckxmin FROM pg_index WHERE indexrelid = 'build_bm'::regclass")
+            old_id = check_snapshot(reader, not hot, 12000)
+            assert flag == hot, (mode, flag)
+            reader.execute('COMMIT')
+            fresh_id = check_snapshot(observer, True, 1 if hot else 12000)
+            print(f'PASS {mode}: indcheckxmin={flag}, old={old_id}, fresh={fresh_id}', flush=True)
+            observer.execute('DROP TABLE build_docs')
+        observer.execute('DROP FUNCTION build_gate(integer)')
 
 
 def performance(cluster):
@@ -656,6 +754,7 @@ def main():
     parser.add_argument('--recovery',action='store_true')
     args=parser.parse_args()
     with Cluster(args.pg_config, args.build_dir) as cluster:
+        parallel_hot_visibility(cluster)
         correctness(cluster)
         lifecycle(cluster)
         recycle_wal_atomicity(cluster)
