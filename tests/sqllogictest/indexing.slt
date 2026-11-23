@@ -17,8 +17,13 @@ INSERT INTO documents (passage) VALUES
 ('PostgreSQL supports both non-relational and relational data types.'),
 ('Effective search ranking algorithms, such as BM25, improve search results by understanding relevance.');
 
+statement error failed to parse options
+CREATE INDEX documents_passage_bm25 ON documents USING bm25 ((to_tsvector('english', passage)) bm25_ops)
+WITH (options = 'k1 = [');
+
 statement ok
-CREATE INDEX documents_passage_bm25 ON documents USING bm25 ((to_tsvector('english', passage)) bm25_ops);
+CREATE INDEX documents_passage_bm25 ON documents USING bm25 ((to_tsvector('english', passage)) bm25_ops)
+WITH (options = E'k1 = 1.2\nb = 0.75');
 
 statement ok
 SET enable_seqscan = off;

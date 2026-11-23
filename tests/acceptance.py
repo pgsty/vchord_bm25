@@ -94,17 +94,19 @@ def scalar(c, sql, args=None):
     return c.execute(sql, args).fetchone()[0]
 
 
+def first_item(page):
+    offset = struct.unpack_from('=I', page, 24)[0] & 0x7fff
+    return page[offset:]
+
+
 def state(c, index):
     # Explicit format-4 inspector, test-only. Native endianness matches this server.
     pages = [bytes(row[0]) for row in c.execute(
         "SELECT get_raw_page(%s, n) FROM generate_series(0,pg_relation_size(%s::regclass)::int/8192-1)n",
         (index, index))]
-    def item(page):
-        off = struct.unpack_from('=I', page, 24)[0] & 0x7fff
-        return page[off:]
-    meta = item(pages[0])
+    meta = first_item(pages[0])
     assert struct.unpack_from('=Q', meta, 8)[0] == 4, 'update test inspector for new format'
-    jump = item(pages[struct.unpack_from('=I', meta, 32)[0]])
+    jump = first_item(pages[struct.unpack_from('=I', meta, 32)[0]])
     generation, horizon = struct.unpack_from('=QQ', jump, 64)
     active = orphan = free = 0
     for page in pages[1:]:
@@ -476,9 +478,8 @@ def recycle_wal_atomicity(cluster):
         assert scalar(c, "SELECT bm25_maintain('wal_recycle_bm')")
         c.execute('SELECT pg_current_xact_id()')
         before = state(c, 'wal_recycle_bm')
-        meta = bytes(scalar(c, "SELECT get_raw_page('wal_recycle_bm', 0)"))
-        item = struct.unpack_from('=I', meta, 24)[0] & 0x7fff
-        jump = struct.unpack_from('=I', meta, item + 32)[0]
+        meta = first_item(bytes(scalar(c, "SELECT get_raw_page('wal_recycle_bm', 0)")))
+        jump = struct.unpack_from('=I', meta, 32)[0]
         rel = c.execute("SELECT coalesce(nullif(reltablespace,0),dattablespace),d.oid,pg_relation_filenode(c.oid) FROM pg_class c CROSS JOIN pg_database d WHERE c.oid='wal_recycle_bm'::regclass AND d.datname=current_database()").fetchone()
         start = str(scalar(c, 'SELECT pg_current_wal_insert_lsn()'))
         assert not scalar(c, "SELECT bm25_maintain('wal_recycle_bm')")
@@ -556,9 +557,18 @@ def recovery(cluster):
     # Publish a second generation; kill recycling after at least one batch.
     c.execute("INSERT INTO rec VALUES(65001,'term:1')");c.execute('VACUUM rec')
     c.execute('SELECT pg_current_xact_id()')
-    before=state(c,'rec_bm');assert before['horizon']!=0
+    meta = first_item(bytes(scalar(c, "SELECT get_raw_page('rec_bm', 0)")))
+    jump_block = struct.unpack_from('=I', meta, 32)[0]
+    def retirement():
+        jump = first_item(bytes(scalar(c, "SELECT get_raw_page('rec_bm', %s)", (jump_block,))))
+        return struct.unpack_from('=Q8I', jump, 72)
+    before = retirement()
+    assert before[0] != 0
     conn,worker,errors=background(cluster,'VACUUM rec',slow=True)
-    wait_for(lambda:(lambda s:s['free']>before['free'] and s['horizon']!=0)(state(c,'rec_bm')),'partially retired generation')
+    def partially_retired():
+        current = retirement()
+        return current[0] == before[0] and current[1:] != before[1:]
+    wait_for(partially_retired, 'partially retired generation')
     os.kill(conn.info.backend_pid,signal.SIGKILL)
     worker.join(5);conn.close();c.close()
     c=wait_for(reconnect,'recycle crash recovery')
