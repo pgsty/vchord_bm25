@@ -8,7 +8,7 @@ publish = false
 
 [dependencies]
 postgres = "0.19.14"
-rand = "0.10.3"
+rand = "0.10.4"
 ---
 
 // This program is free software: you can redistribute it and/or modify

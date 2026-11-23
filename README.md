@@ -81,7 +81,7 @@ VACUUM documents;
 
 ## Build from Source
 
-Requires Rust 1.99.1+, PostgreSQL 15–19 development headers on `x86_64` or `aarch64`, GNU Make, and matching Clang, libclang, and LLVM tools. The project uses pgrx 0.20.0.
+Building from source requires Rust 1.100.0 or later, PostgreSQL 15–19 development headers on `x86_64` or `aarch64`, GNU Make, and matching Clang, libclang, and LLVM tools. The extension and its SQL generator use pgrx 0.20.1.
 
 ```bash
 git clone https://github.com/pgsty/vchord_bm25.git
