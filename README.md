@@ -77,9 +77,26 @@ SET bm25.prefilter = on;
 VACUUM documents;
 ```
 
-`VACUUM` removes dead entries and merges segments; long transactions can delay page reuse. Scoring requires table SELECT or SELECT on all columns used by a supported index key and predicate, including permission to execute their functions. Applicable row security disables global corpus scoring by default. On the development branch the index owner can set `ALTER INDEX documents_bm25 SET (shared_corpus_stats = on)` to let those readers use whole-index document counts, term frequencies and average document length. Scores can reveal term prevalence across tenants. PostgreSQL still applies row policies to the rows returned. A view grant alone does not grant corpus access. Reset this storage parameter before returning to an older binary.
+`VACUUM` removes dead entries and merges segments. Long transactions can delay page reuse.
 
-For prepared Top-K queries, parameterize the search text and keep the corpus index fixed, for example `ORDER BY vector <&> to_bm25query(to_tsvector('simple', $1), 'documents_bm25'::regclass)`. A generic plan can then identify the index. See the [SQL reference](https://vchord.pgsty.com/docs/bm25/reference/sql/) and [settings](https://vchord.pgsty.com/docs/bm25/reference/gucs/) for details.
+**Development after 1.2.0.** When row security applies to the caller, BM25 scoring requires the index owner's opt-in to whole-index statistics. This setting defaults to off.
+
+```sql
+ALTER INDEX documents_bm25 SET (shared_corpus_stats = on);
+```
+
+Scores use document counts, per-term document frequencies and average document length across the index, so they can reveal term prevalence across tenants. PostgreSQL enforces row policies on returned rows. The caller also needs table-level `SELECT`, or column-level `SELECT` covering the index key and predicate with `EXECUTE` on the functions used in supported expressions. A view grant alone is insufficient. Run `ALTER INDEX documents_bm25 RESET (shared_corpus_stats)` to withdraw the opt-in and before switching back to an older binary.
+
+For prepared Top-K queries, keep the corpus index fixed and parameterize the search text. This lets a generic plan identify the index.
+
+```sql
+PREPARE search_docs(text) AS
+SELECT id FROM documents
+ORDER BY terms <&> to_bm25query(to_tsvector('english', $1), 'documents_bm25'::regclass)
+LIMIT 10;
+```
+
+The [SQL reference](https://vchord.pgsty.com/docs/bm25/reference/sql/) and [settings](https://vchord.pgsty.com/docs/bm25/reference/gucs/) cover the query and index options.
 
 ## Build from Source
 
