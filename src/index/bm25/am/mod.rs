@@ -355,10 +355,6 @@ pub unsafe extern "C-unwind" fn amcostestimate(
             *index_pages = 1.0;
             return;
         }
-        // Keep PostgreSQL's CPU, tablespace and repeated-scan cache estimates,
-        // but posting chains are sequential I/O. Until term-level planner
-        // statistics exist, charge a conservative full-index sequential read.
-        // This is a heuristic, not a measured WAND/posting selectivity model.
         let mut costs = pgrx::pg_sys::GenericCosts::default();
         pgrx::pg_sys::genericcostestimate(root, path, loop_count, &mut costs);
         let mut random = 0.0;
@@ -370,8 +366,29 @@ pub unsafe extern "C-unwind" fn amcostestimate(
         );
         let work = (costs.indexTotalCost - costs.numIndexPages * (random - sequential))
             .max(costs.indexStartupCost);
-        *index_startup_cost = work;
-        *index_total_cost = work;
+        let relation =
+            pgrx::pg_sys::index_open((*index_opt_info).indexoid, pgrx::pg_sys::NoLock as _);
+        let batch = match gucs::bm25_limit(relation) {
+            0 => 100.0,
+            n => f64::from(n),
+        };
+        let sampled_pages = f64::from((*(*relation).rd_rel).relpages);
+        pgrx::pg_sys::index_close(relation, pgrx::pg_sys::NoLock as _);
+        let rows = (*index_opt_info).tuples.max(1.0);
+        let rounds = (1.0 + rows / batch).log2().ceil().max(1.0);
+        // Extension since the last relation size sample is a proxy for unsealed input.
+        let growth = if sampled_pages > 0.0 {
+            (costs.numIndexPages - sampled_pages).max(0.0) * sequential
+        } else {
+            0.0
+        };
+        let prep = (costs.indexStartupCost + growth).min(work);
+        let postings = work - prep;
+        // The first WAND round touches more than a linear fraction of the postings.
+        let first_fraction = ((batch + 1.0) / rows).min(1.0).sqrt();
+        *index_startup_cost = prep + postings * first_fraction;
+        // Each expansion revisits postings; growing statistics are prepared only once.
+        *index_total_cost = prep + postings * rounds;
         // A scan now continues through all candidates; its batch size must
         // never pretend to reduce SQL selectivity or the logical row count.
         *index_selectivity = costs.indexSelectivity;
