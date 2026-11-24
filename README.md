@@ -79,6 +79,8 @@ VACUUM documents;
 
 `VACUUM` removes dead entries and merges segments. Long transactions can delay page reuse.
 
+During `CREATE INDEX`, the leader and participating workers share `maintenance_work_mem` for mapping sort buffers, up to 64 MiB per participant. More mappings spill to temporary files. Other build allocations and PostgreSQL shared buffers also contribute to memory usage.
+
 When row security applies to the caller, BM25 scoring requires the index owner's opt-in to whole-index statistics. This setting defaults to off.
 
 ```sql

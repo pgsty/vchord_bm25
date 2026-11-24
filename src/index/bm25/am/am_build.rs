@@ -143,7 +143,7 @@ pub unsafe extern "C-unwind" fn ambuild(
             c"bm25_parallel_build_main",
             heap_relation,
             index_relation,
-            (*index_info).ii_Concurrent,
+            index_info,
             seed,
             tempdir.as_ref(),
         )
@@ -218,7 +218,7 @@ pub unsafe extern "C-unwind" fn ambuild(
                     pgrx::pg_sys::ConditionVariableBroadcast(
                         &raw mut (*shared).condvar_barrier_leave_0,
                     );
-                    order
+                    (order, leader.nparticipants as u32)
                 },
                 |heap_tuples, index_tuples| {
                     // enter the barrier, publishing this participant's counts
@@ -315,7 +315,7 @@ pub unsafe extern "C-unwind" fn ambuild(
                     reporter.tuples_done(indtuples.get());
                     reporter.tuples_total(indtuples.get());
                 },
-                || 0,
+                || (0, 1),
                 |_, _| (),
                 || (),
             );
@@ -390,26 +390,16 @@ impl Bm25Leader {
         main: &'static CStr,
         heap_relation: pgrx::pg_sys::Relation,
         index_relation: pgrx::pg_sys::Relation,
-        isconcurrent: bool,
+        index_info: *mut pgrx::pg_sys::IndexInfo,
         seed: [u8; 32],
         path: &Path,
     ) -> Option<Self> {
-        unsafe fn compute_parallel_workers(
-            heap_relation: pgrx::pg_sys::Relation,
-            index_relation: pgrx::pg_sys::Relation,
-        ) -> i32 {
-            // The planner already honours the `parallel_workers` reloption (an
-            // unset one is -1), max_parallel_maintenance_workers, the heap size
-            // and maintenance_work_mem; use its answer as is.
-            unsafe {
-                pgrx::pg_sys::plan_create_index_workers(
-                    (*heap_relation).rd_id,
-                    (*index_relation).rd_id,
-                )
-            }
-        }
-
-        let request = unsafe { compute_parallel_workers(heap_relation, index_relation) };
+        #[cfg(any(feature = "pg15", feature = "pg16"))]
+        let request = unsafe {
+            pgrx::pg_sys::plan_create_index_workers((*heap_relation).rd_id, (*index_relation).rd_id)
+        };
+        #[cfg(not(any(feature = "pg15", feature = "pg16")))]
+        let request = unsafe { (*index_info).ii_ParallelWorkers };
         if request <= 0 {
             return None;
         }
@@ -421,6 +411,7 @@ impl Bm25Leader {
             pgrx::pg_sys::CreateParallelContext(c"vchord_bm25".as_ptr(), main.as_ptr(), request)
         };
 
+        let isconcurrent = unsafe { (*index_info).ii_Concurrent };
         let snapshot = if isconcurrent {
             unsafe { pgrx::pg_sys::RegisterSnapshot(pgrx::pg_sys::GetTransactionSnapshot()) }
         } else {
@@ -642,20 +633,21 @@ pub unsafe extern "C-unwind" fn bm25_parallel_build_main(
                     &raw mut (*shared).condvar_barrier_enter_0,
                 );
                 // leave the barrier
-                loop {
+                let participants = loop {
                     pgrx::pg_sys::SpinLockAcquire(&raw mut (*shared).mutex);
                     if (*shared).barrier_leave_0 {
+                        let participants = (*shared).nparticipants;
                         pgrx::pg_sys::SpinLockRelease(&raw mut (*shared).mutex);
-                        break;
+                        break participants;
                     }
                     pgrx::pg_sys::SpinLockRelease(&raw mut (*shared).mutex);
                     pgrx::pg_sys::ConditionVariableSleep(
                         &raw mut (*shared).condvar_barrier_leave_0,
                         pgrx::pg_sys::WaitEventIPC::WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN as _,
                     );
-                }
+                };
                 pgrx::pg_sys::ConditionVariableCancelSleep();
-                order
+                (order, participants)
             },
             |heap_tuples, index_tuples| {
                 // enter the barrier, publishing this participant's counts
@@ -726,13 +718,15 @@ unsafe fn build(
     path: &Path,
     mut report_done: impl FnMut(u64),
     mut report_total: impl FnMut(),
-    sync_0: impl FnOnce() -> u32,
+    sync_0: impl FnOnce() -> (u32, u32),
     sync_1: impl FnOnce(f64, u64),
     sync_2: impl FnOnce(),
 ) -> (f64, u64) {
-    let order = sync_0();
+    let (order, participants) = sync_0();
+    let budget =
+        unsafe { pgrx::pg_sys::maintenance_work_mem } as usize * 1024 / participants as usize;
     let mut records_writer = bm25::io::records_writer(path, order);
-    let mut mappings_writer = bm25::io::mappings_writer(path, order);
+    let mut mappings_writer = bm25::io::mappings_writer(path, order, budget);
 
     let traverser = unsafe { HeapTraverser::new(heap_relation, index_relation, index_info, scan) };
 

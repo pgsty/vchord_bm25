@@ -57,7 +57,10 @@ where
         for hit in &growing.hits {
             check();
             let key = hit.key;
-            if remaining(hit.score, key) && results.competitive(hit.score, key) && filter(hit.payload) {
+            if remaining(hit.score, key)
+                && results.competitive(hit.score, key)
+                && filter(hit.payload)
+            {
                 results.push(hit.score, key, hit.payload);
             }
         }

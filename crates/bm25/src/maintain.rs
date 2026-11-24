@@ -398,7 +398,7 @@ fn rebuild<R: RelationRead + RelationWrite>(
     } else {
         &mut []
     };
-    let mut mappings_writer = crate::io::mappings_writer(dir, 0);
+    let mut mappings_writer = crate::io::mappings_writer(dir, 0, crate::io::MAX_MAPPING_SORT_BYTES);
 
     {
         let mut tape_tokens = TapeReader::new(old.ptr_tokens, |bytes| {

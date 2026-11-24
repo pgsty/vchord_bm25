@@ -167,7 +167,9 @@ pub fn records_writer(dir: impl AsRef<Path>, code: u32) -> RecordsWriter {
     RecordsWriter::create(file)
 }
 
-pub fn mappings_writer(dir: impl AsRef<Path>, code: u32) -> MappingsWriter {
+pub const MAX_MAPPING_SORT_BYTES: usize = 64 * 1024 * 1024;
+
+pub fn mappings_writer(dir: impl AsRef<Path>, code: u32, memory_limit: usize) -> MappingsWriter {
     let dir = dir.as_ref().to_path_buf();
     let mut number = 0_u32;
     let file = move || {
@@ -175,7 +177,7 @@ pub fn mappings_writer(dir: impl AsRef<Path>, code: u32) -> MappingsWriter {
         number = number.checked_add(1).expect("written too many files");
         handle_io_error(File::create_new(dir.join(filename)))
     };
-    MappingsWriter::create(file, 64 * 1024 * 1024)
+    MappingsWriter::create(file, memory_limit.min(MAX_MAPPING_SORT_BYTES))
 }
 
 pub fn write(
