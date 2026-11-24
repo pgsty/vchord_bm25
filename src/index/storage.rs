@@ -274,11 +274,15 @@ impl<O: Opaque> RelationReadTypes for PostgresRelation<O> {
 
 impl<O: Opaque> RelationRead for PostgresRelation<O> {
     fn read(&self, id: u32) -> Self::ReadGuard<'_> {
+        self.lock_page(id, pgrx::pg_sys::BUFFER_LOCK_SHARE as _)
+    }
+}
+
+impl<O: Opaque> PostgresRelation<O> {
+    fn lock_page(&self, id: u32, mode: i32) -> PostgresBufferReadGuard<O> {
         assert!(id != u32::MAX, "no such page");
         unsafe {
-            use pgrx::pg_sys::{
-                BUFFER_LOCK_SHARE, ForkNumber, LockBuffer, ReadBufferExtended, ReadBufferMode,
-            };
+            use pgrx::pg_sys::{ForkNumber, LockBuffer, ReadBufferExtended, ReadBufferMode};
             let buf = ReadBufferExtended(
                 self.raw,
                 ForkNumber::MAIN_FORKNUM,
@@ -286,7 +290,7 @@ impl<O: Opaque> RelationRead for PostgresRelation<O> {
                 ReadBufferMode::RBM_NORMAL,
                 std::ptr::null_mut(),
             );
-            LockBuffer(buf, BUFFER_LOCK_SHARE as _);
+            LockBuffer(buf, mode);
             let page =
                 NonNull::new(pgrx::BufferGetPage!(buf).get().cast()).expect("failed to get page");
             PostgresBufferReadGuard { buf, page, id }
@@ -344,6 +348,33 @@ impl<O: Opaque> RelationWrite for PostgresRelation<O> {
                 NonNull::new(GenericXLogRegisterBuffer(right.state, right.buf, 0).cast()).unwrap();
             right
         }
+    }
+    fn retire_pages(
+        &self,
+        mut head: Self::WriteGuard<'_>,
+        first: u32,
+        mut unlink: impl FnMut(&mut Self::Page, &mut Self::Page) -> Option<u32>,
+    ) -> u32 {
+        use pgrx::pg_sys::{
+            BUFFER_LOCK_EXCLUSIVE, GenericXLogRegisterBuffer, MAX_GENERIC_XLOG_PAGES,
+        };
+        let mut locked = [const { None }; MAX_GENERIC_XLOG_PAGES as usize - 1];
+        let mut next = Some(first);
+        let mut count = 0;
+        for slot in &mut locked {
+            let Some(id) = next else { break };
+            let page = slot.insert(self.lock_page(id, BUFFER_LOCK_EXCLUSIVE as _));
+            let copy = unsafe {
+                GenericXLogRegisterBuffer(head.state, page.buf, 0).cast::<PostgresPage<O>>()
+            };
+            next = unlink(&mut head, unsafe { &mut *copy });
+            count += 1;
+        }
+        drop(head);
+        for page in locked.into_iter().flatten() {
+            self.record_free(page.id());
+        }
+        count
     }
     fn write(&self, id: u32) -> PostgresBufferWriteGuard<O> {
         assert!(id != u32::MAX, "no such page");

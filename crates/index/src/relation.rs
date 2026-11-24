@@ -85,6 +85,13 @@ pub trait RelationWrite: RelationWriteTypes {
         left: Self::WriteGuard<'a>,
         right: Self::WriteGuard<'a>,
     ) -> Self::WriteGuard<'a>;
+    /// Atomically advance a chain head and retire successive pages. Report free pages under lock.
+    fn retire_pages(
+        &self,
+        head: Self::WriteGuard<'_>,
+        first: u32,
+        unlink: impl FnMut(&mut Self::Page, &mut Self::Page) -> Option<u32>,
+    ) -> u32;
     fn free(&self, guard: Self::WriteGuard<'_>);
     fn vacuum(&self);
     /// Number of pages in the main fork.

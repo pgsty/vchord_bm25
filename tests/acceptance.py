@@ -591,8 +591,9 @@ def recycle_wal_atomicity(cluster):
                                '-R', '/'.join(map(str, rel)), '-b').stdout
         records = re.split(r'(?m)(?=^rmgr:)', dump)
         blocks = [list(map(int, re.findall(r'fork main blk (\d+)', record))) for record in records if record.strip()]
-        assert all(b == [jump] or len(b) == 2 and b[0] == jump for b in blocks), dump
-        assert sum(len(b) == 2 for b in blocks) == freed, (freed, blocks, dump)
+        assert all(1 <= len(b) <= 4 and b[0] == jump and len(set(b)) == len(b) for b in blocks), dump
+        retired = [page for record in blocks for page in record[1:]]
+        assert len(retired) == len(set(retired)) == freed, (freed, blocks, dump)
         print('PASS atomic recycle WAL:', freed, 'deleted pages each paired with jump', flush=True)
         c.execute('DROP TABLE wal_recycle')
 

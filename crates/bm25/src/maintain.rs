@@ -159,7 +159,7 @@ where
         loop {
             // Lock order: jump, then retired page. Publication takes only
             // jump; no active growing page belongs to a graveyard chain.
-            let mut jump_guard = index.write(ptr_jump);
+            let jump_guard = index.write(ptr_jump);
             let jump = JumpTuple::deserialize_ref(jump_guard.get(1).expect("data corruption"));
             let (current, end) = graveyard_get(jump, chain);
             let generation = jump.generation();
@@ -167,22 +167,20 @@ where
                 index.discard(jump_guard);
                 break;
             }
-            let mut page = index.write(current);
-            assert!(
-                page.get_opaque().generation < generation,
-                "data corruption: a graveyard page was reused; REINDEX required"
-            );
-            let next = page.get_opaque().next;
-            page.get_opaque_mut().set_deleted();
-            let jump_bytes = jump_guard.get_mut(1).expect("data corruption");
-            graveyard_set(&mut JumpTuple::deserialize_mut(jump_bytes), chain, next);
-            let page = index.commit_pair(jump_guard, page);
-            index.record_free(current);
-            // commit_pair retains a fresh write record for an appender. We
-            // have no further edits; do not WAL-log an empty record here.
-            index.discard(page);
-            recycled += 1;
-            if recycled as usize % RECYCLE_BATCH == 0 {
+            let count = index.retire_pages(jump_guard, current, |jump, page| {
+                assert!(
+                    page.get_opaque().generation < generation,
+                    "data corruption: a graveyard page was reused; REINDEX required"
+                );
+                let next = page.get_opaque().next;
+                page.get_opaque_mut().set_deleted();
+                let bytes = jump.get_mut(1).expect("data corruption");
+                graveyard_set(&mut JumpTuple::deserialize_mut(bytes), chain, next);
+                (next != end && next != u32::MAX).then_some(next)
+            });
+            let before = recycled;
+            recycled += count;
+            if recycled as usize / RECYCLE_BATCH != before as usize / RECYCLE_BATCH {
                 check();
             }
         }

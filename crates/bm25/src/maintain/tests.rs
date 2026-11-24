@@ -250,6 +250,30 @@ impl RelationWrite for TestRelation {
         drop(left);
         right
     }
+    fn retire_pages(
+        &self,
+        mut head: Write<'_>,
+        first: u32,
+        mut unlink: impl FnMut(&mut TestPage, &mut TestPage) -> Option<u32>,
+    ) -> u32 {
+        let mut pages = Vec::new();
+        let mut next = Some(first);
+        while let Some(id) = next {
+            let mut page = self.write(id);
+            next = unlink(&mut head, &mut page);
+            pages.push(page);
+            if pages.len() == 3 {
+                break;
+            }
+        }
+        let mut updates = vec![(head.id, &head.page)];
+        updates.extend(pages.iter().map(|p| (p.id, &p.page)));
+        self.commit(&updates);
+        for page in &pages {
+            self.record_free(page.id);
+        }
+        pages.len() as u32
+    }
     fn free(&self, mut page: Write<'_>) {
         page.get_opaque_mut().set_deleted();
         self.record_free(page.id());
@@ -294,7 +318,7 @@ fn fixture() -> TestRelation {
         graveyard_free_documents: u32::MAX,
         graveyard_free_tokens: u32::MAX,
     };
-    let mut pages = (0..5)
+    let mut pages = (0..8)
         .map(|_| TestPage {
             opaque: Opaque {
                 next: u32::MAX,
@@ -315,18 +339,22 @@ fn fixture() -> TestRelation {
         .serialize(),
     );
     pages[2].opaque.next = 3;
-    pages[3].opaque.next = 4;
+    pages[3].opaque.next = 5;
+    pages[5].opaque.next = 6;
+    pages[6].opaque.next = 7;
+    pages[7].opaque.next = 4;
     TestRelation::new(pages)
 }
 
 #[test]
 fn stale_fsm_reuse_survives_every_recycle_wal_boundary() {
     let original = fixture();
-    assert_eq!(recycle(&original, 1, &|| {}), 2);
+    assert_eq!(recycle(&original, 1, &|| {}), 5);
     let prefixes = original.wal.borrow().clone();
     for (boundary, pages) in prefixes.into_iter().enumerate() {
         let recovered = TestRelation::new(pages);
-        let reusable = (2..=3)
+        let reusable = [2, 3, 5, 6, 7]
+            .into_iter()
             .filter(|&id| recovered.pages.borrow()[id].opaque.is_deleted())
             .collect::<Vec<_>>();
         // A persisted stale FSM hint may offer any deleted page immediately
@@ -361,8 +389,8 @@ fn stale_fsm_reuse_survives_every_recycle_wal_boundary() {
 #[test]
 fn recycle_rejects_a_reused_graveyard_page_without_modifying_it() {
     let relation = fixture();
-    relation.pages.borrow_mut()[2].opaque.generation = 2;
-    relation.pages.borrow_mut()[2].items.push(b"live".to_vec());
+    relation.pages.borrow_mut()[3].opaque.generation = 2;
+    relation.pages.borrow_mut()[3].items.push(b"live".to_vec());
     let before = relation.pages.borrow().clone();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         recycle(&relation, 1, &|| {});
