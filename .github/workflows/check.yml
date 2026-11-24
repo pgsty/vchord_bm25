@@ -241,7 +241,7 @@ jobs:
       - name: Upload Artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: postgresql-${{ matrix.version }}-vchord-bm25_1.2.0_${{ matrix.arch }}-linux-gnu
+          name: postgresql-${{ matrix.version }}-vchord-bm25_1.3.0_${{ matrix.arch }}-linux-gnu
           path: ./build
           compression-level: 9
           retention-days: 14
@@ -256,13 +256,13 @@ jobs:
           sqllogictest --db $(whoami) --user $(whoami) './tests/sqllogictest/*.slt'
 
       # Every C symbol referenced by supported 1.0.0+ SQL scripts must remain
-      # exported, and upgrading from 1.0.0 or 1.1.0 must preserve indexes and
-      # match a fresh 1.2.0 installation.
+      # exported, and upgrading from each previous 1.x version must preserve indexes and
+      # match a fresh installation of the current version.
       - name: Extension scripts
         run: |
           ./devtools/check-symbols.sh "$($PG_CONFIG --pkglibdir)/vchord_bm25.so"
           if ! grep -q "^default_version = '0.0.0'$" vchord_bm25.control; then
-            for version in 1.0.0 1.1.0; do
+            for version in 1.0.0 1.1.0 1.2.0; do
               sudo install -m 644 "sql/install/vchord_bm25--$version.sql" "$($PG_CONFIG --sharedir)/extension/"
               ./devtools/check-upgrade.sh "$version"
             done
@@ -387,7 +387,7 @@ jobs:
       - name: Upload Artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: postgresql-${{ matrix.version }}-vchord-bm25_1.2.0_${{ matrix.arch }}-apple-darwin
+          name: postgresql-${{ matrix.version }}-vchord-bm25_1.3.0_${{ matrix.arch }}-apple-darwin
           path: ./build
           compression-level: 9
           retention-days: 14
@@ -507,7 +507,7 @@ jobs:
       - name: Upload Artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: postgresql-${{ matrix.version }}-vchord-bm25_1.2.0_${{ matrix.arch }}-pc-windows-msvc
+          name: postgresql-${{ matrix.version }}-vchord-bm25_1.3.0_${{ matrix.arch }}-pc-windows-msvc
           path: ./build
           compression-level: 9
           retention-days: 14
@@ -636,7 +636,7 @@ jobs:
       - name: Upload Artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: postgresql-${{ matrix.version }}-vchord-bm25_1.2.0_${{ matrix.arch }}-linux-musl
+          name: postgresql-${{ matrix.version }}-vchord-bm25_1.3.0_${{ matrix.arch }}-linux-musl
           path: ./build
           compression-level: 9
           retention-days: 14

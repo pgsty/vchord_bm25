@@ -42,10 +42,9 @@
         "url": "https://pgxn.org/meta/spec.txt"
     },
     "tags": [
-        "vector search",
-        "vectors",
-        "datatype",
-        "nearest neighbor search",
-        "approximate nearest neighbors"
+        "full text search",
+        "bm25",
+        "tsvector",
+        "ranking"
     ]
 }

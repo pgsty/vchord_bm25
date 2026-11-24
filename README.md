@@ -3,12 +3,12 @@
 [![Website: vchord.pgsty.com](https://img.shields.io/badge/Website-vchord.pgsty.com-slategray?style=flat&logo=cilium&logoColor=white)](https://vchord.pgsty.com/)
 [![Docs: bm25](https://img.shields.io/badge/Docs-bm25-slategray?style=flat)](https://vchord.pgsty.com/docs/bm25/)
 [![Catalog: bm25](https://img.shields.io/badge/Catalog-bm25-%233E668F?style=flat&logo=postgresql&logoColor=white&labelColor=3E668F)](https://pgext.cloud/ext/vchord_bm25)
-[![Version: 1.2.0](https://img.shields.io/badge/Version-1.2.0-slategray?style=flat)](docs/release-notes/1.2.0.md)
+[![Version: 1.3.0](https://img.shields.io/badge/Version-1.3.0-slategray?style=flat)](docs/release-notes/1.3.0.md)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-slategray?style=flat&logo=gnu&logoColor=white)](https://github.com/pgsty/vchord_bm25/blob/main/LICENSE)
 [![GitHub Stars](https://img.shields.io/github/stars/pgsty/vchord_bm25?style=flat&logo=github&logoColor=black&color=slategray)](https://star-history.com/#pgsty/vchord_bm25&Date)
 [![PostgreSQL: 15-19](https://img.shields.io/badge/PostgreSQL-15--19-%233E668F?style=flat&logo=postgresql&logoColor=white&labelColor=3E668F)](#build-from-source)
 
-vchord_bm25 1.2.0 provides native BM25 full-text ranking for PostgreSQL 15–19 on `x86_64` and `aarch64`, using Block-WeakAnd (WAND).
+vchord_bm25 1.3.0 provides native BM25 full-text ranking for PostgreSQL 15–19 on `x86_64` and `aarch64`, using Block-WeakAnd (WAND).
 
 [Documentation](https://vchord.pgsty.com/docs/bm25/) · [Releases](https://github.com/pgsty/vchord_bm25/releases) · [Issues](https://github.com/pgsty/vchord_bm25/issues)
 
@@ -79,7 +79,7 @@ VACUUM documents;
 
 `VACUUM` removes dead entries and merges segments. Long transactions can delay page reuse.
 
-**Development after 1.2.0.** When row security applies to the caller, BM25 scoring requires the index owner's opt-in to whole-index statistics. This setting defaults to off.
+When row security applies to the caller, BM25 scoring requires the index owner's opt-in to whole-index statistics. This setting defaults to off.
 
 ```sql
 ALTER INDEX documents_bm25 SET (shared_corpus_stats = on);
@@ -103,7 +103,7 @@ The [SQL reference](https://vchord.pgsty.com/docs/bm25/reference/sql/) and [sett
 Building from source requires Rust 1.100.0 or later, PostgreSQL 15–19 development headers on `x86_64` or `aarch64`, GNU Make, and matching Clang, libclang, and LLVM tools. The extension and its SQL generator use pgrx 0.20.1.
 
 ```bash
-git clone --branch 1.2.0 --depth 1 https://github.com/pgsty/vchord_bm25.git
+git clone --branch 1.3.0 --depth 1 https://github.com/pgsty/vchord_bm25.git
 cd vchord_bm25
 PG_CONFIG=/path/to/pg_config make build
 sudo make PG_CONFIG=/path/to/pg_config install
@@ -119,7 +119,7 @@ Install the new library and SQL files, restart PostgreSQL, then run in each data
 ALTER EXTENSION vchord_bm25 UPDATE;
 ```
 
-Versions 1.0.0 and 1.1.0 upgrade in place and keep their format-4 indexes. PostgreSQL 14 installations must first move to a supported server major. Legacy `bm25vector` installations require data migration and index rebuilding. See the [1.2.0 release notes](docs/release-notes/1.2.0.md) and the [migration guide](https://vchord.pgsty.com/docs/bm25/reference/migration/).
+Versions 1.0.0, 1.1.0 and 1.2.0 upgrade in place and keep their format-4 indexes. PostgreSQL 14 installations must first move to a supported server major. Legacy `bm25vector` installations require data migration and index rebuilding. See the [1.3.0 release notes](docs/release-notes/1.3.0.md) and the [migration guide](https://vchord.pgsty.com/docs/bm25/reference/migration/).
 
 ## Testing
 

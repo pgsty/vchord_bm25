@@ -1,0 +1,1 @@
+-- Version 1.3.0 retains the SQL objects and format-4 indexes of 1.2.0.
