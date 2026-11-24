@@ -274,12 +274,12 @@ impl<O: Opaque> RelationReadTypes for PostgresRelation<O> {
 
 impl<O: Opaque> RelationRead for PostgresRelation<O> {
     fn read(&self, id: u32) -> Self::ReadGuard<'_> {
-        self.lock_page(id, pgrx::pg_sys::BUFFER_LOCK_SHARE as _)
+        self.lock_page(id, pgrx::pg_sys::BUFFER_LOCK_SHARE)
     }
 }
 
 impl<O: Opaque> PostgresRelation<O> {
-    fn lock_page(&self, id: u32, mode: i32) -> PostgresBufferReadGuard<O> {
+    fn lock_page(&self, id: u32, mode: u32) -> PostgresBufferReadGuard<O> {
         assert!(id != u32::MAX, "no such page");
         unsafe {
             use pgrx::pg_sys::{ForkNumber, LockBuffer, ReadBufferExtended, ReadBufferMode};
@@ -290,7 +290,7 @@ impl<O: Opaque> PostgresRelation<O> {
                 ReadBufferMode::RBM_NORMAL,
                 std::ptr::null_mut(),
             );
-            LockBuffer(buf, mode);
+            LockBuffer(buf, mode as _);
             let page =
                 NonNull::new(pgrx::BufferGetPage!(buf).get().cast()).expect("failed to get page");
             PostgresBufferReadGuard { buf, page, id }
@@ -363,7 +363,7 @@ impl<O: Opaque> RelationWrite for PostgresRelation<O> {
         let mut count = 0;
         for slot in &mut locked {
             let Some(id) = next else { break };
-            let page = slot.insert(self.lock_page(id, BUFFER_LOCK_EXCLUSIVE as _));
+            let page = slot.insert(self.lock_page(id, BUFFER_LOCK_EXCLUSIVE));
             let copy = unsafe {
                 GenericXLogRegisterBuffer(head.state, page.buf, 0).cast::<PostgresPage<O>>()
             };
