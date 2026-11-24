@@ -142,7 +142,7 @@ GRANT SELECT (vector, secret) ON bm25_perm_data.partials TO bm25_perm_reader;
 statement ok
 SET ROLE bm25_perm_reader;
 
-# Only the ordinary, non-partial indexed column qualifies for the exception.
+# Column grants cover the key, its expression and the partial predicate.
 query II
 SELECT has_table_privilege('bm25_perm_data.documents', 'SELECT')::int,
        has_column_privilege('bm25_perm_data.documents', 'vector', 'SELECT')::int;
@@ -165,10 +165,10 @@ SELECT count(*) FROM (SELECT vector FROM bm25_perm_data.documents ORDER BY vecto
 ----
 3
 
-statement error permission denied for table expressions
+statement ok
 SELECT 'search:1'::tsvector OPERATOR(bm25_perm_api.<&>) bm25_perm_api.to_bm25query('search:1', 'bm25_perm_data.expressions_bm25');
 
-statement error permission denied for table partials
+statement ok
 SELECT 'search:1'::tsvector OPERATOR(bm25_perm_api.<&>) bm25_perm_api.to_bm25query('search:1', 'bm25_perm_data.partials_bm25');
 
 # Native scans use the same contract, even with grants on every referenced column.
@@ -178,7 +178,7 @@ FROM (SELECT bm25_perm_data.plan($q$SELECT content FROM bm25_perm_data.expressio
 ----
 1
 
-statement error permission denied for table expressions
+statement ok
 SELECT content FROM bm25_perm_data.expressions ORDER BY to_tsvector('simple', content) OPERATOR(bm25_perm_api.<&>) bm25_perm_api.to_bm25query('search:1', 'bm25_perm_data.expressions_bm25');
 
 query I
@@ -187,11 +187,47 @@ FROM (SELECT bm25_perm_data.plan($q$SELECT vector FROM bm25_perm_data.partials W
 ----
 1
 
-statement error permission denied for table partials
+statement ok
 SELECT vector FROM bm25_perm_data.partials WHERE secret ORDER BY vector OPERATOR(bm25_perm_api.<&>) bm25_perm_api.to_bm25query('search:1', 'bm25_perm_data.partials_bm25');
 
 statement ok
 RESET ROLE;
+
+statement ok
+REVOKE SELECT (secret) ON bm25_perm_data.partials FROM bm25_perm_reader;
+
+statement ok
+SET ROLE bm25_perm_reader;
+
+statement error permission denied for table partials
+SELECT 'search:1'::tsvector OPERATOR(bm25_perm_api.<&>) bm25_perm_api.to_bm25query('search:1', 'bm25_perm_data.partials_bm25');
+
+statement ok
+RESET ROLE;
+
+statement ok
+CREATE FUNCTION bm25_perm_data.make_vector(text) RETURNS tsvector LANGUAGE sql IMMUTABLE RETURN to_tsvector('simple', $1);
+
+statement ok
+CREATE INDEX expressions_private ON bm25_perm_data.expressions USING bm25 (bm25_perm_data.make_vector(content) bm25_perm_api.bm25_ops);
+
+statement ok
+REVOKE EXECUTE ON FUNCTION bm25_perm_data.make_vector(text) FROM PUBLIC;
+
+statement ok
+SET ROLE bm25_perm_reader;
+
+statement error permission denied for table expressions
+SELECT 'search:1'::tsvector OPERATOR(bm25_perm_api.<&>) bm25_perm_api.to_bm25query('search:1', 'bm25_perm_data.expressions_private');
+
+statement ok
+RESET ROLE;
+
+statement ok
+DROP INDEX bm25_perm_data.expressions_private;
+
+statement ok
+DROP FUNCTION bm25_perm_data.make_vector(text);
 
 statement ok
 GRANT SELECT ON bm25_perm_data.documents, bm25_perm_data.expressions, bm25_perm_data.partials TO bm25_perm_reader;
@@ -342,6 +378,72 @@ query I
 SELECT count(*) FROM (SELECT vector FROM bm25_perm_data.documents ORDER BY vector OPERATOR(bm25_perm_api.<&>) bm25_perm_api.to_bm25query('search:1', 'bm25_perm_data.documents_bm25')) AS ranked;
 ----
 3
+
+statement ok
+RESET ROLE;
+
+statement ok
+SET ROLE bm25_perm_reader;
+
+statement error must be owner
+ALTER INDEX bm25_perm_data.documents_bm25 SET (shared_corpus_stats=on);
+
+statement ok
+RESET ROLE;
+
+statement ok
+SET ROLE bm25_perm_owner;
+
+statement ok
+ALTER INDEX bm25_perm_data.documents_bm25 SET (shared_corpus_stats=on);
+
+statement ok
+SET ROLE bm25_perm_reader;
+
+query I
+EXECUTE bm25_permission_probe;
+----
+1
+
+statement ok
+SET bm25.prefilter = on;
+
+query I
+SELECT id FROM bm25_perm_data.documents ORDER BY vector OPERATOR(bm25_perm_api.<&>) bm25_perm_api.to_bm25query('search:1', 'bm25_perm_data.documents_bm25') LIMIT 3;
+----
+1
+
+statement ok
+SET bm25.enable_scan = off;
+
+query I
+SELECT id FROM bm25_perm_data.documents ORDER BY vector OPERATOR(bm25_perm_api.<&>) bm25_perm_api.to_bm25query('search:1', 'bm25_perm_data.documents_bm25') LIMIT 3;
+----
+1
+
+statement ok
+RESET bm25.enable_scan;
+
+statement ok
+SET row_security = off;
+
+statement error row-level security policy
+EXECUTE bm25_permission_probe;
+
+statement ok
+RESET row_security;
+
+statement ok
+RESET ROLE;
+
+statement ok
+ALTER INDEX bm25_perm_data.documents_bm25 RESET (shared_corpus_stats);
+
+statement ok
+SET ROLE bm25_perm_reader;
+
+statement error bm25 cannot expose global corpus statistics under row-level security
+EXECUTE bm25_permission_probe;
 
 statement ok
 RESET ROLE;

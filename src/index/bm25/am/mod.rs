@@ -27,11 +27,16 @@ pub struct Reloption {
     options: i32,
     limit: i32,
     prefilter: bool,
+    shared_corpus_stats: bool,
     maintenance_min_rows: i32,
     maintenance_scale_factor: f64,
 }
 
 impl Reloption {
+    pub unsafe fn shared_corpus_stats(this: *const Self) -> bool {
+        !this.is_null() && unsafe { (*this).shared_corpus_stats }
+    }
+
     pub unsafe fn maintenance(this: *const Self, force: bool) -> bm25::Policy {
         bm25::Policy {
             min_rows: if this.is_null() {
@@ -101,6 +106,13 @@ const TABLE: &[pgrx::pg_sys::relopt_parse_elt] = &[
         isset_offset: 0,
     },
     pgrx::pg_sys::relopt_parse_elt {
+        optname: c"shared_corpus_stats".as_ptr(),
+        opttype: pgrx::pg_sys::relopt_type::RELOPT_TYPE_BOOL,
+        offset: std::mem::offset_of!(Reloption, shared_corpus_stats) as i32,
+        #[cfg(feature = "pg18")]
+        isset_offset: 0,
+    },
+    pgrx::pg_sys::relopt_parse_elt {
         optname: c"maintenance_min_rows".as_ptr(),
         opttype: pgrx::pg_sys::relopt_type::RELOPT_TYPE_INT,
         offset: std::mem::offset_of!(Reloption, maintenance_min_rows) as i32,
@@ -162,6 +174,13 @@ pub fn init() {
                 kind as _,
                 c"prefilter".as_ptr(),
                 c"Search parameter `bm25.prefilter`".as_ptr(),
+                false,
+                pgrx::pg_sys::AccessExclusiveLock as pgrx::pg_sys::LOCKMODE,
+            );
+            pgrx::pg_sys::add_bool_reloption(
+                kind as _,
+                c"shared_corpus_stats".as_ptr(),
+                c"Allow authorized readers subject to row security to score against the entire index".as_ptr(),
                 false,
                 pgrx::pg_sys::AccessExclusiveLock as pgrx::pg_sys::LOCKMODE,
             );
@@ -579,7 +598,10 @@ pub unsafe extern "C-unwind" fn amgettuple(
         } else {
             options.limit as usize
         };
-        scanner.prefilter = options.prefilter;
+        scanner.prefilter = options.prefilter
+            && unsafe {
+                !(*scan).heapRelation.is_null() && !(*(*(*scan).heapRelation).rd_rel).relrowsecurity
+            };
         if let Some(hack) = scanner.hack {
             // Volatile predicates and SubPlans must run only in PostgreSQL's
             // executor, which evaluates the qual again: the volatility walker

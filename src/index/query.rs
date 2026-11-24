@@ -16,10 +16,18 @@ use std::rc::Rc;
 
 // Statistics do not depend on the role; permission checks do.
 type Key = (Oid, Query);
+#[derive(Hash, PartialEq, Eq)]
+struct Authority {
+    index: Oid,
+    role: Oid,
+    row_security: bool,
+    no_force_rls: bool,
+}
+
 #[derive(Default)]
 struct Cache {
     entries: RefCell<Lru<Key, bm25::Prepared>>,
-    seeds: RefCell<HashMap<(Oid, Oid), [u8; 32]>>,
+    seeds: RefCell<HashMap<Authority, [u8; 32]>>,
 }
 
 impl Cache {
@@ -71,16 +79,23 @@ pub fn enter(desc: *mut pg_sys::QueryDesc) -> Active {
 /// Checks that the current role may read the index's corpus statistics, once
 /// per execution, index and role.
 pub fn seed(oid: Oid) -> [u8; 32] {
-    let role = unsafe { pg_sys::GetUserId() };
+    let authority = unsafe {
+        Authority {
+            index: oid,
+            role: pg_sys::GetUserId(),
+            row_security: pg_sys::row_security,
+            no_force_rls: pg_sys::InNoForceRLSOperation(),
+        }
+    };
     let active = ACTIVE.with_borrow(Clone::clone);
     if let Some(cache) = &active {
-        if let Some(seed) = cache.seeds.borrow().get(&(oid, role)) {
+        if let Some(seed) = cache.seeds.borrow().get(&authority) {
             return *seed;
         }
     }
     let seed = crate::index::operators::load_seed(oid);
     if let Some(cache) = active {
-        cache.seeds.borrow_mut().insert((oid, role), seed);
+        cache.seeds.borrow_mut().insert(authority, seed);
     }
     seed
 }

@@ -11,6 +11,7 @@ mod fetcher;
 mod gucs;
 mod hook;
 mod operators;
+mod permissions;
 mod query;
 mod storage;
 mod temp;

@@ -77,7 +77,9 @@ SET bm25.prefilter = on;
 VACUUM documents;
 ```
 
-`VACUUM` removes dead entries and merges segments; long transactions can delay page reuse. Scoring requires access to the indexed table or column and rejects applicable row-level security. See the [SQL reference](https://vchord.pgsty.com/docs/bm25/reference/sql/) and [settings](https://vchord.pgsty.com/docs/bm25/reference/gucs/) for details.
+`VACUUM` removes dead entries and merges segments; long transactions can delay page reuse. Scoring requires table SELECT or SELECT on all columns used by a supported index key and predicate, including permission to execute their functions. Applicable row security disables global corpus scoring by default. On the development branch the index owner can set `ALTER INDEX documents_bm25 SET (shared_corpus_stats = on)` to let those readers use whole-index document counts, term frequencies and average document length. Scores can reveal term prevalence across tenants. PostgreSQL still applies row policies to the rows returned. A view grant alone does not grant corpus access. Reset this storage parameter before returning to an older binary.
+
+For prepared Top-K queries, parameterize the search text and keep the corpus index fixed, for example `ORDER BY vector <&> to_bm25query(to_tsvector('simple', $1), 'documents_bm25'::regclass)`. A generic plan can then identify the index. See the [SQL reference](https://vchord.pgsty.com/docs/bm25/reference/sql/) and [settings](https://vchord.pgsty.com/docs/bm25/reference/gucs/) for details.
 
 ## Build from Source
 
