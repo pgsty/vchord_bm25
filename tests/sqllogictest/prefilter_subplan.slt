@@ -1,6 +1,5 @@
 # Prefiltering evaluates the scan's qual inside the index and the executor
-# evaluates it again. Quals with SubPlans must not be prefiltered: their
-# side effects would run twice (and random choices compound).
+# evaluates it again. Volatile subqueries must run only in the executor.
 statement ok
 CREATE TABLE prefilter_sub_docs (id integer PRIMARY KEY, tag integer, body tsvector);
 
@@ -175,6 +174,24 @@ ORDER BY d.body <&> to_bm25query(to_tsvector('simple', 'other'), 'prefilter_sub_
 $q$);
 ----
 30 930 0
+
+# A repeatable correlated count must use fresh outer parameters on every rescan.
+query II rowsort
+SELECT k.tag, r.id
+FROM (VALUES (1), (2), (1)) AS k(tag)
+CROSS JOIN LATERAL (
+    SELECT d.id FROM prefilter_sub_docs AS d
+    WHERE (SELECT count(*) FROM prefilter_sub_ok AS o WHERE o.id = d.id AND o.tag = k.tag) > 0
+    ORDER BY d.body <&> to_bm25query('term'::tsvector, 'prefilter_sub_bm25')
+    LIMIT 2
+) AS r;
+----
+1 16
+1 16
+1 26
+1 26
+2 2
+2 22
 
 # Plain quals are still prefiltered and give the same rows.
 query T

@@ -8,6 +8,7 @@
 
 mod am_build;
 mod am_vacuumcleanup;
+mod prefilter;
 
 use crate::datatype::memory_tsvector::TsVectorInput;
 use crate::datatype::tsvector::cast_tsvector_to_document;
@@ -602,18 +603,10 @@ pub unsafe extern "C-unwind" fn amgettuple(
             && unsafe {
                 !(*scan).heapRelation.is_null() && !(*(*(*scan).heapRelation).rd_rel).relrowsecurity
             };
-        if let Some(hack) = scanner.hack {
-            // Volatile predicates and SubPlans must run only in PostgreSQL's
-            // executor, which evaluates the qual again: the volatility walker
-            // does not look into a SubPlan's plan, and evaluating a SubPlan
-            // twice duplicates its side effects and random choices.
-            let qual = unsafe { (*(*hack.as_ptr()).ss.ps.plan).qual.cast() };
-            if unsafe {
-                pgrx::pg_sys::contain_volatile_functions(qual)
-                    || pgrx::pg_sys::contain_subplans(qual)
-            } {
-                scanner.prefilter = false;
-            }
+        if scanner.prefilter
+            && let Some(hack) = scanner.hack
+        {
+            scanner.prefilter = unsafe { prefilter::safe(hack) };
         }
     }
     loop {
