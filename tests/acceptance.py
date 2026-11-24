@@ -689,7 +689,7 @@ def recovery(cluster):
 
 def standby(cluster, primary):
     cluster.standby=cluster.root/'standby'
-    cluster.command('pg_basebackup','-D',cluster.standby,'-h',cluster.root,'-p',cluster.port,'-U','bm25test','-X','stream','-R','--checkpoint=fast')
+    cluster.command('pg_basebackup','-D',cluster.standby,'-h',cluster.root,'-p',cluster.port,'-U','bm25test','-X','stream','-C','-S','bm25_acceptance','-R','--checkpoint=fast')
     with (cluster.standby/'postgresql.conf').open('a') as f:
         f.write("\nport=58944\nhot_standby_feedback=off\nmax_standby_streaming_delay=-1\n")
     cluster.command('pg_ctl','-D',cluster.standby,'-l',cluster.root/'standby.log','-w','-t',15,'start')
