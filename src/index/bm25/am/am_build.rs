@@ -164,11 +164,11 @@ pub unsafe extern "C-unwind" fn ambuild(
                 ),
                 (*leader.bm25shared).seed,
                 parse_path(leader.path),
-                || {
+                |delta| {
                     let indtuples;
                     {
                         pgrx::pg_sys::SpinLockAcquire(&raw mut (*leader.bm25shared).mutex);
-                        (*leader.bm25shared).indtuples += 1;
+                        (*leader.bm25shared).indtuples += delta;
                         indtuples = (*leader.bm25shared).indtuples;
                         pgrx::pg_sys::SpinLockRelease(&raw mut (*leader.bm25shared).mutex);
                     }
@@ -307,8 +307,8 @@ pub unsafe extern "C-unwind" fn ambuild(
                 std::ptr::null_mut(),
                 seed,
                 tempdir.path(),
-                || {
-                    indtuples.update(|indtuples| indtuples + 1);
+                |delta| {
+                    indtuples.update(|indtuples| indtuples + delta);
                     reporter.tuples_done(indtuples.get());
                 },
                 || {
@@ -623,9 +623,9 @@ pub unsafe extern "C-unwind" fn bm25_parallel_build_main(
             ),
             (*bm25shared).seed,
             parse_path(path),
-            || {
+            |delta| {
                 pgrx::pg_sys::SpinLockAcquire(&raw mut (*bm25shared).mutex);
-                (*bm25shared).indtuples += 1;
+                (*bm25shared).indtuples += delta;
                 pgrx::pg_sys::SpinLockRelease(&raw mut (*bm25shared).mutex);
             },
             || (),
@@ -724,7 +724,7 @@ unsafe fn build(
     scan: *mut pgrx::pg_sys::TableScanDescData,
     seed: [u8; 32],
     path: &Path,
-    mut report_done: impl FnMut(),
+    mut report_done: impl FnMut(u64),
     mut report_total: impl FnMut(),
     sync_0: impl FnOnce() -> u32,
     sync_1: impl FnOnce(f64, u64),
@@ -764,8 +764,13 @@ unsafe fn build(
             );
         }
         index_tuples += 1;
-        report_done();
+        if index_tuples % 1024 == 0 {
+            report_done(1024);
+        }
     });
+    if index_tuples % 1024 != 0 {
+        report_done(index_tuples % 1024);
+    }
 
     sync_1(heap_tuples, index_tuples);
 
