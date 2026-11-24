@@ -433,6 +433,7 @@ fn nine_multi_term_queries_fit_work_mem_without_recollection() {
                 let prepared = Rc::new(crate::Prepared::collect(
                     &relation,
                     &Query::new(terms),
+                    crate::Purpose::Score,
                     || {},
                     crate::Reader {
                         in_recovery: false,
@@ -454,4 +455,57 @@ fn nine_multi_term_queries_fit_work_mem_without_recollection() {
         "the first statistics for each key must remain shared"
     );
     assert!(cache.bytes() <= 64 * 1024);
+}
+
+#[test]
+fn scalar_preparation_pins_the_growing_cut_and_completion_keys() {
+    use crate::vector::{Element, Query};
+    let relation = fixture();
+    let term = [1; WIDTH];
+    let hit = Document::new(vec![Element {
+        key: term,
+        value: 1,
+    }]);
+    let zero = Document::new(Vec::new());
+    for (i, doc) in [&zero, &hit, &zero, &Document::null()]
+        .into_iter()
+        .enumerate()
+    {
+        crate::insert(&relation, doc, [0, 0, i as u16], || {});
+    }
+    let reader = crate::Reader {
+        in_recovery: false,
+        conflict: &|| unreachable!(),
+    };
+    let prepared = crate::Prepared::collect(
+        &relation,
+        &Query::new(vec![term]),
+        crate::Purpose::Score,
+        || {},
+        reader,
+    );
+    assert!(prepared.candidates.get().is_none());
+    crate::insert(&relation, &hit, [0, 0, 4], || {});
+    crate::bulkdelete(&relation, || {}, |p| p[2] == 0);
+    prepared.prepare_scan(&relation, reader, || {});
+    let mut after = None;
+    let mut keys = Vec::new();
+    loop {
+        let rows = crate::search(
+            &relation,
+            1.try_into().unwrap(),
+            &prepared,
+            after,
+            |_| true,
+            || {},
+            reader,
+        );
+        let Some(&(score, key, payload)) = rows.first() else {
+            break;
+        };
+        assert_eq!(key, u64::from(payload[2]));
+        keys.push(key);
+        after = Some((score, key));
+    }
+    assert_eq!(keys, [1, 2, 3]);
 }

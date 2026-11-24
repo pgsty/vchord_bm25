@@ -89,18 +89,28 @@ pub fn prepare(
     index: &PostgresRelation<bm25::Opaque>,
     oid: Oid,
     query: &Query,
+    purpose: bm25::Purpose,
 ) -> Rc<bm25::Prepared> {
     authorize(oid);
     let active = ACTIVE.with_borrow(Clone::clone);
     let key = (oid, query.clone());
     if let Some(cache) = &active {
-        if let Some(prepared) = cache.entries.borrow_mut().get(&key) {
+        let hit = cache.entries.borrow_mut().get(&key);
+        if let Some(prepared) = hit {
+            if purpose == bm25::Purpose::Scan
+                && prepared.prepare_scan(index, crate::index::storage::reader(), || {
+                    pgrx::check_for_interrupts()
+                })
+            {
+                cache.insert(key, prepared.clone());
+            }
             return prepared;
         }
     }
     let prepared = Rc::new(bm25::Prepared::collect(
         index,
         query,
+        purpose,
         || {
             pgrx::check_for_interrupts();
         },

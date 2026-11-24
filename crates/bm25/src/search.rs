@@ -22,7 +22,7 @@ use std::num::NonZero;
 /// `(score, key, payload)`.
 ///
 /// Results are totally ordered by descending score, then ascending internal
-/// key: growing documents by their position in `prepared`, then sealed
+/// key: growing documents by physical completion order, then sealed
 /// documents by document id. Keys are stable for one preparation, so `after`
 /// resumes a scan exactly. WAND visits sealed documents in key order and every
 /// key already in the heap is smaller, so a document that only ties the k-th
@@ -45,22 +45,19 @@ where
     let jump = prepared.jump;
     let sealed = Checked::new(index, jump.generation, reader);
     let index = &sealed;
-    let base = prepared.growing.len() as u64;
+    let base = prepared.boundary.count;
+    let growing = prepared.candidates.get().expect("unprepared index scan");
     let mut results = Results::new(k);
     // Sealed documents evaluated while the heap was not full, in id order.
     let mut matched = Vec::<u32>::new();
     // Every positive document precedes `after` once the scan reached the zero
     // or NULL documents; only their identities are needed to skip them below.
     let positives_done = after.is_some_and(|(score, _)| score <= 0.0);
-    for (i, growing) in prepared.growing.iter().enumerate() {
+    for hit in &growing.hits {
         check();
-        let key = i as u64;
-        if growing.score > 0.0
-            && remaining(growing.score, key)
-            && results.competitive(growing.score, key)
-            && filter(growing.payload)
-        {
-            results.push(growing.score, key, growing.payload);
+        let key = hit.key;
+        if remaining(hit.score, key) && results.competitive(hit.score, key) && filter(hit.payload) {
+            results.push(hit.score, key, hit.payload);
         }
     }
 
@@ -279,36 +276,19 @@ where
                 break;
             }
             let is_null = score == f64::NEG_INFINITY;
-            if !is_null
-                || prepared
-                    .growing
-                    .iter()
-                    .any(|g| g.score == f64::NEG_INFINITY)
-            {
-                for (i, growing) in prepared
-                    .growing
-                    .iter()
-                    .enumerate()
-                    .skip(from.min(base) as usize)
-                {
-                    if results.full() {
-                        break;
-                    }
-                    let tier = if growing.score == f64::NEG_INFINITY {
-                        f64::NEG_INFINITY
-                    } else if growing.score <= 0.0 {
-                        0.0
-                    } else {
-                        continue;
-                    };
-                    let key = i as u64;
-                    if tier == score && remaining(score, key) && filter(growing.payload) {
-                        results.push(score, key, growing.payload);
-                    }
-                    if i % 1024 == 0 {
-                        check();
-                    }
-                }
+            if from < base {
+                growing.visit_tail(
+                    index,
+                    from,
+                    is_null,
+                    |key, payload| {
+                        if filter(payload) {
+                            results.push(score, key, payload);
+                        }
+                        !results.full()
+                    },
+                    &mut check,
+                );
             }
             if results.full() || (is_null && jump.number_of_nulls == 0) {
                 continue;

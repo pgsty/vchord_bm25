@@ -8,10 +8,17 @@
 
 use crate::bm25::{Cache, length_to_fieldnorm};
 use crate::checked::{Checked, Reader, growing_page_is_newer};
+use crate::growing::{Boundary, Candidates, GrowingReader, Unscored};
 use crate::tuples::*;
-use crate::vector::{Document, Element, Query};
+use crate::vector::{Document, Query};
 use crate::{Opaque, address_tokens};
 use index::relation::{Page, RelationRead};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+    Score,
+    Scan,
+}
 
 /// Owned query state. No pins, relation handles or memory-context pointers.
 /// Counts include physical non-NULL records until compaction removes them.
@@ -19,7 +26,8 @@ use index::relation::{Page, RelationRead};
 pub struct Prepared {
     pub(crate) jump: Jump,
     pub(crate) tokens: Vec<Token>,
-    pub(crate) growing: Vec<Growing>,
+    pub(crate) boundary: Boundary,
+    pub(crate) candidates: std::cell::OnceCell<Candidates>,
     pub(crate) bound_scale: f64,
     // Query statistics equal the sealed segment's: block bounds are exact.
     pub(crate) exact_bounds: bool,
@@ -52,15 +60,11 @@ pub(crate) struct Token {
     pub bound: Cache,
 }
 
-pub(crate) struct Growing {
-    pub payload: [u16; 3],
-    pub score: f64, // -infinity denotes SQL NULL, ordered after zero.
-}
-
 impl Prepared {
     pub fn collect<R: RelationRead>(
         index: &R,
         query: &Query,
+        purpose: Purpose,
         mut check: impl FnMut(),
         reader: Reader<'_>,
     ) -> Self
@@ -117,63 +121,19 @@ impl Prepared {
         let mut n = jump.number_of_documents - jump.number_of_nulls;
         let mut sum_len = jump.sum_of_document_lengths;
         let mut df = vec![0_u32; query.len()];
-        let mut documents = Vec::new();
-        let mut state = None;
-        let mut page = jump.ptr_vectors;
-        let mut start = jump.ptr_vectors_offset;
-        while page != u32::MAX {
-            let guard = index.read(page);
-            let opaque = *guard.get_opaque();
-            if growing_page_is_newer(opaque, jump.generation, reader) {
-                break;
-            }
-            let end = if let Some((last, end)) = cut {
-                if page == last { end } else { guard.len() }
-            } else {
-                guard.len()
-            };
-            for i in start..=end {
-                match VectorTuple::deserialize_ref(guard.get(i).expect("data corruption")) {
-                    VectorTupleReader::_2(t) => {
-                        state = Some((
-                            t.fieldnorm(),
-                            t.is_null(),
-                            0_u32,
-                            Vec::<(usize, u32)>::new(),
-                        ))
-                    }
-                    VectorTupleReader::_1(t) => {
-                        let (_, _, len, terms) = state.as_mut().expect("incomplete vector");
-                        collect_elements(t.elements(), query, len, terms);
-                    }
-                    VectorTupleReader::_0(t) => {
-                        let (fieldnorm, is_null, mut len, mut terms) =
-                            state.take().expect("incomplete vector");
-                        collect_elements(t.elements(), query, &mut len, &mut terms);
-                        if !is_null {
-                            n = n.checked_add(1).expect("too many documents");
-                            sum_len += u64::from(len);
-                            for &(q, _) in &terms {
-                                df[q] += 1;
-                            }
-                        }
-                        if !bool::from(t.deleted()) {
-                            documents.push((t.payload(), fieldnorm, is_null, terms));
-                        }
-                    }
-                }
-            }
-            let next = opaque.next;
-            drop(guard);
-            check();
-            if cut.is_some_and(|(last, _)| page == last) {
-                break;
-            }
-            page = next;
-            start = 1;
+        let mut scan = (purpose == Purpose::Scan).then(Unscored::default);
+        let boundary = GrowingReader {
+            index,
+            reader,
+            check: &mut check,
         }
-        // A crash can leave an unfinished, uncommitted last document. It has
-        // no payload/completion record and never contributes to this query.
+        .collect(jump, query, cut, scan.as_mut(), |len, terms| {
+            n = n.checked_add(1).expect("too many documents");
+            sum_len += u64::from(len);
+            for &(q, _) in terms {
+                df[q] += 1;
+            }
+        });
         let avgdl = if n == 0 {
             1.0
         } else {
@@ -215,39 +175,58 @@ impl Prepared {
             });
             check();
         }
-        let growing = documents
-            .into_iter()
-            .enumerate()
-            .map(|(i, (payload, fieldnorm, is_null, terms))| {
-                if i % 1024 == 0 {
-                    check();
-                }
-                let score = if is_null {
-                    f64::NEG_INFINITY
-                } else {
-                    terms
-                        .into_iter()
-                        .map(|(q, tf)| tokens[q].bm25.evaluate(fieldnorm, tf))
-                        .sum()
-                };
-                Growing { payload, score }
-            })
-            .collect();
+        let candidates = std::cell::OnceCell::new();
+        if let Some(scan) = scan {
+            candidates.get_or_init(|| scan.score(&tokens, &mut check));
+        }
         Self {
             jump,
             tokens,
-            growing,
+            boundary,
+            candidates,
             bound_scale: (avgdl / sealed_avgdl).max(1.0),
             exact_bounds: avgdl.to_bits() == sealed_avgdl.to_bits(),
             query: query.clone(),
         }
     }
 
+    pub fn prepare_scan<R: RelationRead>(
+        &self,
+        index: &R,
+        reader: Reader<'_>,
+        mut check: impl FnMut(),
+    ) -> bool
+    where
+        R::Page: Page<Opaque = Opaque>,
+    {
+        if self.candidates.get().is_some() {
+            return false;
+        }
+        let mut scan = Unscored::default();
+        if self.boundary.count != 0 {
+            GrowingReader {
+                index,
+                reader,
+                check: &mut check,
+            }
+            .collect(
+                self.jump,
+                &self.query,
+                self.boundary.cut,
+                Some(&mut scan),
+                |_, _| {},
+            );
+        }
+        self.candidates
+            .get_or_init(|| scan.score(&self.tokens, &mut check));
+        true
+    }
+
     /// Heap bytes held by this preparation, for cache budgeting.
     pub fn approximate_size(&self) -> usize {
         size_of::<Self>()
             + self.tokens.capacity() * size_of::<Token>()
-            + self.growing.capacity() * size_of::<Growing>()
+            + self.candidates.get().map_or(0, Candidates::bytes)
             + self.query.len() * size_of::<[u8; crate::WIDTH]>()
             // Two shared normalization arrays, including Rc's two counters.
             + usize::from(!self.tokens.is_empty()) * 2 * (size_of::<[f64; 256]>() + 2 * size_of::<usize>())
@@ -268,19 +247,5 @@ impl Prepared {
             }
         }
         score
-    }
-}
-
-fn collect_elements(
-    elements: &[Element],
-    query: &Query,
-    len: &mut u32,
-    terms: &mut Vec<(usize, u32)>,
-) {
-    for e in elements {
-        *len = len.saturating_add(e.value);
-        if let Ok(q) = query.as_slice().binary_search(&e.key) {
-            terms.push((q, e.value));
-        }
     }
 }

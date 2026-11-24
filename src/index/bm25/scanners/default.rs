@@ -87,6 +87,6 @@ impl DefaultBuilder {
         // A NULL ordering expression is constant for every row; any order is
         // valid, but it still has to return every indexed row.
         let query = vector.unwrap_or_else(|| Query::new(Vec::new()));
-        crate::index::query::prepare(index, self.oid, &query)
+        crate::index::query::prepare(index, self.oid, &query, bm25::Purpose::Scan)
     }
 }

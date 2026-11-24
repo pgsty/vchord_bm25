@@ -230,7 +230,7 @@ pub fn _bm25_evaluate(lhs: TsVectorInput, rhs: pgrx::composite_type!("bm25query"
     let seed = bm25::seed::seed(&index);
     let lhs = cast_tsvector_to_document(&seed, lhs.as_borrowed());
     let rhs = cast_tsvector_to_query(&seed, vector.as_borrowed());
-    let prepared = crate::index::query::prepare(&index, relation.oid(), &rhs);
+    let prepared = crate::index::query::prepare(&index, relation.oid(), &rhs, bm25::Purpose::Score);
     // Subtract instead of negating, so a zero score is +0 rather than -0.
     0.0 - prepared.evaluate(&lhs)
 }
