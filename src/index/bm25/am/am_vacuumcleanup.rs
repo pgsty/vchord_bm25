@@ -65,13 +65,10 @@ fn run(
         )
     };
     let next_xid = || unsafe { pg_sys::ReadNextFullTransactionId().value };
-    let dir = tempdir();
-    let file = tempfile();
     let result = bm25::maintain(
         &index,
         check,
-        dir.path(),
-        file.path(),
+        || (tempdir(), tempfile()),
         can_recycle,
         next_xid,
         policy,

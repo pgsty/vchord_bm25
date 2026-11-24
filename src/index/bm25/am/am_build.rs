@@ -145,7 +145,7 @@ pub unsafe extern "C-unwind" fn ambuild(
             index_relation,
             (*index_info).ii_Concurrent,
             seed,
-            tempdir.path(),
+            tempdir.as_ref(),
         )
     } {
         unsafe {
@@ -306,7 +306,7 @@ pub unsafe extern "C-unwind" fn ambuild(
                 index_info,
                 std::ptr::null_mut(),
                 seed,
-                tempdir.path(),
+                tempdir.as_ref(),
                 |delta| {
                     indtuples.update(|indtuples| indtuples + delta);
                     reporter.tuples_done(indtuples.get());
@@ -324,7 +324,7 @@ pub unsafe extern "C-unwind" fn ambuild(
     };
     reporter.phase(BuildPhase::from_code(BuildPhaseCode::Writing));
     let index = unsafe { PostgresRelation::new(index_relation) };
-    let segment = bm25::io::readers(tempdir.path(), total);
+    let segment = bm25::io::readers(tempdir.as_ref(), total);
     bm25::build(bm25_options.index, &index, seed, segment, &|| {
         pgrx::check_for_interrupts();
     });

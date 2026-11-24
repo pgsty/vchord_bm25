@@ -43,17 +43,19 @@ pub struct Policy {
 // A rebuilt segment is published together with `safexid`. Its predecessor's
 // pages stay in place until a later pass sees `can_recycle(safexid)`: every
 // snapshot that could have copied their addresses is gone by then.
-pub fn maintain<R: RelationRead + RelationWrite>(
+pub fn maintain<R, D, F>(
     index: &R,
     check: impl Fn(),
-    dir: &Path,
-    file: &Path,
+    workspace: impl FnOnce() -> (D, F),
     can_recycle: impl Fn(u64) -> bool,
     next_xid: impl Fn() -> u64,
     policy: Policy,
 ) -> Maintained
 where
+    R: RelationRead + RelationWrite,
     R::Page: Page<Opaque = Opaque>,
+    D: AsRef<Path>,
+    F: AsRef<Path>,
 {
     let meta_guard = index.read(0);
     let meta_bytes = meta_guard.get(1).expect("data corruption");
@@ -90,11 +92,12 @@ where
     if pending || !changed || !(policy.force || enough) {
         return maintained;
     }
+    let (dir, file) = workspace();
     rebuild(
         index,
         &check,
-        dir,
-        file,
+        dir.as_ref(),
+        file.as_ref(),
         (k1, b),
         ptr_jump,
         generation,

@@ -12,8 +12,8 @@ pub struct TempFile {
     path: PathBuf,
 }
 
-impl TempFile {
-    pub fn path(&self) -> &Path {
+impl AsRef<Path> for TempFile {
+    fn as_ref(&self) -> &Path {
         self.path.as_path()
     }
 }
@@ -34,8 +34,8 @@ pub struct TempDir {
     path: PathBuf,
 }
 
-impl TempDir {
-    pub fn path(&self) -> &Path {
+impl AsRef<Path> for TempDir {
+    fn as_ref(&self) -> &Path {
         self.path.as_path()
     }
 }
