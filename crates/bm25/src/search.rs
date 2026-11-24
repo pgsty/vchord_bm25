@@ -53,11 +53,13 @@ where
     // Every positive document precedes `after` once the scan reached the zero
     // or NULL documents; only their identities are needed to skip them below.
     let positives_done = after.is_some_and(|(score, _)| score <= 0.0);
-    for hit in &growing.hits {
-        check();
-        let key = hit.key;
-        if remaining(hit.score, key) && results.competitive(hit.score, key) && filter(hit.payload) {
-            results.push(hit.score, key, hit.payload);
+    if !positives_done {
+        for hit in &growing.hits {
+            check();
+            let key = hit.key;
+            if remaining(hit.score, key) && results.competitive(hit.score, key) && filter(hit.payload) {
+                results.push(hit.score, key, hit.payload);
+            }
         }
     }
 
