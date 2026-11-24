@@ -9,7 +9,6 @@
 use crate::datatype::memory_tsvector::TsVectorOutput;
 use crate::datatype::tsvector::cast_tsvector_to_query;
 use bm25::vector::Query;
-use index::relation::{Page, RelationId, RelationRead};
 use pgrx::heap_tuple::PgHeapTuple;
 use pgrx::pg_sys::Oid;
 use std::num::NonZero;
@@ -21,14 +20,8 @@ pub struct DefaultBuilder {
 }
 
 impl DefaultBuilder {
-    pub fn new<R>(index: R, (): ()) -> Self
-    where
-        R: RelationId + RelationRead,
-        R::Page: Page<Opaque = bm25::Opaque>,
-    {
-        let oid = Oid::from_u32(index.id());
-        crate::index::operators::check_index_permissions(oid);
-        let seed = bm25::seed::seed(&index);
+    pub fn new(oid: Oid) -> Self {
+        let seed = crate::index::query::seed(oid);
         Self {
             oid,
             seed,
@@ -87,6 +80,7 @@ impl DefaultBuilder {
         // A NULL ordering expression is constant for every row; any order is
         // valid, but it still has to return every indexed row.
         let query = vector.unwrap_or_else(|| Query::new(Vec::new()));
-        crate::index::query::prepare(index, self.oid, &query, bm25::Purpose::Scan)
+        crate::index::query::seed(self.oid);
+        crate::index::query::prepare(self.oid, &query, Some(index))
     }
 }

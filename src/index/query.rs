@@ -11,7 +11,7 @@ use bm25::vector::Query;
 use index::lru::Lru;
 use pgrx::pg_sys::{self, Oid};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 // Statistics do not depend on the role; permission checks do.
@@ -19,7 +19,7 @@ type Key = (Oid, Query);
 #[derive(Default)]
 struct Cache {
     entries: RefCell<Lru<Key, bm25::Prepared>>,
-    checked: RefCell<HashSet<(Oid, Oid)>>,
+    seeds: RefCell<HashMap<(Oid, Oid), [u8; 32]>>,
 }
 
 impl Cache {
@@ -70,43 +70,52 @@ pub fn enter(desc: *mut pg_sys::QueryDesc) -> Active {
 
 /// Checks that the current role may read the index's corpus statistics, once
 /// per execution, index and role.
-pub fn authorize(oid: Oid) {
+pub fn seed(oid: Oid) -> [u8; 32] {
     let role = unsafe { pg_sys::GetUserId() };
     let active = ACTIVE.with_borrow(Clone::clone);
-    // Record a role only after its check passed: an error caught by a
-    // PL/pgSQL handler must not let a retry in this execution skip it.
-    match &active {
-        Some(cache) if cache.checked.borrow().contains(&(oid, role)) => (),
-        Some(cache) => {
-            crate::index::operators::check_index_permissions(oid);
-            cache.checked.borrow_mut().insert((oid, role));
+    if let Some(cache) = &active {
+        if let Some(seed) = cache.seeds.borrow().get(&(oid, role)) {
+            return *seed;
         }
-        None => crate::index::operators::check_index_permissions(oid),
     }
+    let seed = crate::index::operators::load_seed(oid);
+    if let Some(cache) = active {
+        cache.seeds.borrow_mut().insert((oid, role), seed);
+    }
+    seed
 }
 
 pub fn prepare(
-    index: &PostgresRelation<bm25::Opaque>,
     oid: Oid,
     query: &Query,
-    purpose: bm25::Purpose,
+    scan: Option<&PostgresRelation<bm25::Opaque>>,
 ) -> Rc<bm25::Prepared> {
-    authorize(oid);
     let active = ACTIVE.with_borrow(Clone::clone);
     let key = (oid, query.clone());
     if let Some(cache) = &active {
         let hit = cache.entries.borrow_mut().get(&key);
         if let Some(prepared) = hit {
-            if purpose == bm25::Purpose::Scan
-                && prepared.prepare_scan(index, crate::index::storage::reader(), || {
+            if scan.is_some_and(|index| {
+                prepared.prepare_scan(index, crate::index::storage::reader(), || {
                     pgrx::check_for_interrupts()
                 })
-            {
+            }) {
                 cache.insert(key, prepared.clone());
             }
             return prepared;
         }
     }
+    let relation;
+    let borrowed;
+    let (index, purpose) = match scan {
+        Some(index) => (index, bm25::Purpose::Scan),
+        None => {
+            // The seed lookup retained the table and index locks for this transaction.
+            relation = crate::index::operators::Index::open(oid, pg_sys::NoLock as _);
+            borrowed = unsafe { PostgresRelation::new(relation.raw()) };
+            (&borrowed, bm25::Purpose::Score)
+        }
+    };
     let prepared = Rc::new(bm25::Prepared::collect(
         index,
         query,

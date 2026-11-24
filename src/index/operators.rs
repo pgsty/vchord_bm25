@@ -188,6 +188,15 @@ pub fn _bm25_evaluate(lhs: TsVectorInput, rhs: pgrx::composite_type!("bm25query"
         Ok(None) => pgrx::error!("bm25query contains a null index"),
         Err(_) => unreachable!(),
     };
+    let seed = crate::index::query::seed(index);
+    let lhs = cast_tsvector_to_document(&seed, lhs.as_borrowed());
+    let rhs = cast_tsvector_to_query(&seed, vector.as_borrowed());
+    let prepared = crate::index::query::prepare(index, &rhs, None);
+    // Subtract instead of negating, so a zero score is +0 rather than -0.
+    0.0 - prepared.evaluate(&lhs)
+}
+
+pub(super) fn load_seed(index: Oid) -> [u8; 32] {
     let Some(pg_am_oid) = am_oid_by_name(c"bm25") else {
         pgrx::error!("vchord_bm25 is not installed");
     };
@@ -212,7 +221,7 @@ pub fn _bm25_evaluate(lhs: TsVectorInput, rhs: pgrx::composite_type!("bm25query"
     // Check permissions and validity before reading any index page. An index
     // left by a failed CREATE INDEX CONCURRENTLY may have no metapage, or
     // incomplete corpus statistics.
-    crate::index::query::authorize(relation.oid());
+    check_index_permissions(relation.oid());
     if !relation.is_valid() {
         pg_sys::panic::ErrorReport::new(
             pgrx::PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
@@ -226,21 +235,16 @@ pub fn _bm25_evaluate(lhs: TsVectorInput, rhs: pgrx::composite_type!("bm25query"
         .report(pg_sys::elog::PgLogLevel::ERROR);
         unreachable!();
     }
-    let index = unsafe { PostgresRelation::new(relation.raw()) };
-    let seed = bm25::seed::seed(&index);
-    let lhs = cast_tsvector_to_document(&seed, lhs.as_borrowed());
-    let rhs = cast_tsvector_to_query(&seed, vector.as_borrowed());
-    let prepared = crate::index::query::prepare(&index, relation.oid(), &rhs, bm25::Purpose::Score);
-    // Subtract instead of negating, so a zero score is +0 rather than -0.
-    0.0 - prepared.evaluate(&lhs)
+    let index = unsafe { PostgresRelation::<bm25::Opaque>::new(relation.raw()) };
+    bm25::seed::seed(&index)
 }
 
-struct Index {
+pub(super) struct Index {
     raw: *mut pg_sys::RelationData,
 }
 
 impl Index {
-    fn open(indexrelid: Oid, lockmode: pg_sys::LOCKMASK) -> Self {
+    pub(super) fn open(indexrelid: Oid, lockmode: pg_sys::LOCKMASK) -> Self {
         Self {
             raw: unsafe { pg_sys::index_open(indexrelid, lockmode) },
         }
@@ -248,7 +252,7 @@ impl Index {
     fn oid(&self) -> Oid {
         unsafe { (*self.raw).rd_id }
     }
-    fn raw(&self) -> *mut pg_sys::RelationData {
+    pub(super) fn raw(&self) -> *mut pg_sys::RelationData {
         self.raw
     }
     fn is_valid(&self) -> bool {

@@ -504,13 +504,12 @@ pub unsafe extern "C-unwind" fn amrescan(
         scanner.after = None;
         scanner.exhausted = false;
         scanner.scanning = Vec::new().into_iter();
-        let index = PostgresRelation::new((*scan).indexRelation);
         let options = SearchOptions {
             limit: gucs::bm25_limit((*scan).indexRelation),
             prefilter: gucs::bm25_prefilter((*scan).indexRelation),
         };
         scanner.pending = {
-            let mut builder = DefaultBuilder::new(index, ());
+            let mut builder = DefaultBuilder::new((*(*scan).indexRelation).rd_id);
             for i in 0..(*scan).numberOfOrderBys {
                 let data = (*scan).orderByData.add(i as usize);
                 let value = (*data).sk_argument;
