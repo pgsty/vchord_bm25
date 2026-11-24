@@ -81,13 +81,15 @@ where
     let mut tape_tokens = TapeWriter::<_, TokenTuple>::create(index, generation);
     let mut tape_summaries = TapeWriter::<_, SummaryTuple>::create(index, generation);
     let mut tape_blocks = TapeWriter::<_, BlockTuple>::create(index, generation);
+    let mut blocks_until_check = 128_usize;
     while let Some(token_id) = mappings.peek().map(|&Mapping(token_id, ..)| token_id) {
         let mut token_number_of_documents = 0_u32;
         let mut token_wand = Wand::new();
         let mut wptr_summaries = (tape_summaries.first(), 1);
         let mut ordinal = 0_usize;
         while Some(token_id) == mappings.peek().map(|&Mapping(token_id, ..)| token_id) {
-            if ordinal % 128 == 0 {
+            if blocks_until_check == 0 {
+                blocks_until_check = 128;
                 tape_tokens.release();
                 tape_summaries.release();
                 tape_blocks.release();
@@ -96,6 +98,7 @@ where
                 tape_summaries.acquire();
                 tape_blocks.acquire();
             }
+            blocks_until_check -= 1;
             let block = {
                 let func = |Mapping(i, ..): &Mapping| &token_id == i;
                 let mut internal = Vec::with_capacity(128);
